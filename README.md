@@ -1,6 +1,14 @@
 # 🎙️ Voice Control Computer Assistant
 
-A sophisticated Python-based AI assistant that uses Google's Gemini AI to provide natural language computer control through voice commands. This assistant can understand context from both voice and screen content to perform complex computer operations.
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Gemini AI](https://img.shields.io/badge/AI-Gemini-brightgreen.svg)](https://deepmind.google/technologies/gemini/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+A Python-based system that leverages Google's Gemini AI API for real-time computer control through natural language processing. The application implements a bidirectional WebSocket architecture for seamless AI communication, coupled with multi-threaded audio processing and computer vision for contextual awareness. Features include real-time PCM audio streaming, adaptive silence detection algorithms, and a modular command execution system for OS-level control operations.
+
+Core technical implementations include concurrent audio buffer management using asyncio, WebSocket-based streaming for real-time AI interactions, and computer vision integration for contextual screen analysis. The system employs a state management system for handling various input/output modalities and provides cross-platform support through PyAutoGUI for system control operations.
+
 
 ## ✨ Features
 - 🗣️ Advanced voice command recognition with natural language processing
@@ -16,7 +24,7 @@ A sophisticated Python-based AI assistant that uses Google's Gemini AI to provid
 - 🔒 Secure API key management through environment variables
 
 ## 🛠️ Technical Stack
-- Python 3.8+
+- Python 3.8+ 
 - Google Gemini AI API
 - WebSocket for real-time communication
 - PyAudio for audio processing
