@@ -16,6 +16,11 @@ class APIClient:
         self.ws = None
         self.last_screenshot = None
         self.last_screenshot_cv = None
+        self.context = {
+            "task_stack": [],
+            "session_state": {},
+            "last_action": None
+        }
 
     def take_screenshot(self) -> dict:
         """Take a screenshot and return it in the format expected by Gemini."""
@@ -165,6 +170,7 @@ class APIClient:
     async def send_text(self, text: str):
         """Send text input to the API."""
         logger.info(f"Sending text: {text}")
+        self.context["last_action"] = {"type": "text_input", "value": text}
         msg = {
             "client_content": {
                 "turns": [{
@@ -194,3 +200,21 @@ class APIClient:
         except Exception as e:
             logger.error(f"Connection failed: {str(e)}")
             return False
+
+    def update_context(self, action_result):
+        """Update context with action results."""
+        if isinstance(action_result, dict):
+            self.context["last_action"] = action_result
+            if "task" in action_result:
+                self.context["task_stack"].append(action_result["task"])
+            if "state" in action_result:
+                self.context["session_state"].update(action_result["state"])
+
+    async def push_task(self, task):
+        """Add a task to the task stack."""
+        self.context["task_stack"].append(task)
+
+    async def pop_task(self):
+        """Remove the last task from the stack."""
+        if self.context["task_stack"]:
+            return self.context["task_stack"].pop()

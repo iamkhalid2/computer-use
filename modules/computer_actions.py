@@ -147,6 +147,56 @@ class ComputerActions:
                 if element_id is not None:
                     return await self._handle_hover(element_id)
 
+            elif action_type == "moveToElement":
+                element = action.get("element")
+                if element:
+                    coords = self.api_client.find_ui_element(element)
+                    if coords:
+                        x, y = coords
+                        pyautogui.moveTo(x, y, duration=0.5)
+                        return True
+                    else:
+                        logger.error(f"Could not find UI element: {element}")
+                        return False
+
+            elif action_type == "moveTo":
+                x = action.get("x")
+                y = action.get("y")
+                if x is not None and y is not None:
+                    pyautogui.moveTo(x, y, duration=0.5)
+                    return True
+
+            elif action_type == "click":
+                if "element" in action:
+                    coords = self.api_client.find_ui_element(action["element"])
+                    if coords:
+                        x, y = coords
+                        pyautogui.click(x, y)
+                        return True
+                    else:
+                        logger.error(f"Could not find UI element to click: {action['element']}")
+                        return False
+                else:
+                    x = action.get("x")
+                    y = action.get("y")
+                    if x is not None and y is not None:
+                        pyautogui.click(x, y)
+                        return True
+
+            elif action_type == "press":
+                key = action.get("key")
+                if key:
+                    if key == "alt+tab":
+                        pyautogui.hotkey("alt", "tab")
+                    elif key in ["minimize", "maximize"]:
+                        if key == "minimize":
+                            pyautogui.hotkey("win", "down")
+                        else:
+                            pyautogui.hotkey("win", "up")
+                    else:
+                        pyautogui.press(key)
+                    return True
+
             logger.error(f"Invalid action or missing parameters: {action}")
             return False
 

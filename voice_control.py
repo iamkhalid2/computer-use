@@ -9,7 +9,7 @@ import os
 import wave
 import base64
 from modules.audio_manager import AudioManager
-from modules.computer_actions import ComputerActions, ActionPlanner
+from modules.computer_actions import ComputerActions
 from modules.api_client import APIClient
 from modules.config import RECEIVE_SAMPLE_RATE
 
@@ -22,11 +22,10 @@ class VoiceControl:
         self.audio_manager = AudioManager() if mode == 'voice' else None
         self.computer_actions = ComputerActions()
         self.api_client = APIClient()
-        self.action_planner = ActionPlanner()
         self.send_screenshots = True
 
     async def handle_response(self, response: dict):
-        """Handle API responses with support for complex tasks."""
+        """Handle API responses."""
         try:
             if "serverContent" in response:
                 content = response["serverContent"]
@@ -55,32 +54,8 @@ class VoiceControl:
                         if isinstance(args, str):
                             args = json.loads(args)
                         
-                        # Handle complex tasks
-                        if args.get("action") == "complex_task":
-                            await self.api_client.push_task(args.get("text", "Unknown task"))
-                            screen_info = self.api_client.take_screenshot()
-                            plan = self.action_planner.create_plan(args.get("text"), screen_info)
-                            
-                            for step in plan:
-                                success = await self.computer_actions.execute_action(step)
-                                if not success:
-                                    logger.error(f"Failed at step: {step}")
-                                    break
-                                
-                                # Update context and validate
-                                screen_info = self.api_client.take_screenshot()
-                                self.action_planner.update_context(screen_info)
-                                
-                                if not self.action_planner.validate_step(step.get("validation"), screen_info):
-                                    logger.error(f"Validation failed for step: {step}")
-                                    break
-                                    
-                                await asyncio.sleep(0.5)
-                            
-                            await self.api_client.pop_task()
-                            success = True
-                        else:
-                            success = await self.computer_actions.execute_action(args)
+                        success = await self.computer_actions.execute_action(args)
+                        self.api_client.update_context({"action": args, "success": success})
                         
                         try:
                             msg = {
@@ -90,10 +65,7 @@ class VoiceControl:
                                         "id": fc["id"],
                                         "response": {
                                             "result": "ok" if success else "failed",
-                                            "context": {
-                                                "task_stack": self.api_client.context["task_stack"],
-                                                "session_state": self.api_client.context["session_state"]
-                                            }
+                                            "context": self.api_client.context
                                         }
                                     }]
                                 }
