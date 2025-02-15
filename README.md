@@ -3,7 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Python-based system that leverages Google's Gemini AI API for real-time computer control through voice or text input. The application implements a bidirectional WebSocket architecture for seamless AI communication, coupled with multi-threaded audio processing, computer vision, and OCR for contextual awareness.
+A Python-based AI agentic assistant that leverages Google's Gemini AI API for real-time computer control through voice or text input. The application implements a bidirectional WebSocket architecture for seamless AI communication, coupled with multi-threaded audio processing, computer vision, and OCR for contextual awareness.
 
 ## ✨ Features
 - 🗣️ Dual input modes: voice commands or text input
