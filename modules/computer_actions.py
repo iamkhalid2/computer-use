@@ -82,8 +82,8 @@ class ComputerActions:
         try:
             action = json.loads(action_json) if isinstance(action_json, str) else action_json
             
-            # Record the action
-            self.api_client.record_action(action)
+            # Update context with the action
+            self.api_client.update_context(action)
             
             # Extract action details
             action_type = action.get("action")
