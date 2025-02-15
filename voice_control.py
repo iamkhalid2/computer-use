@@ -316,10 +316,6 @@ class ComputerControl:
                         audio_data = np.frombuffer(data, dtype=np.int16)
                         audio_level = np.abs(audio_data).mean()
                         
-                        # Log audio levels periodically
-                        if len(self.audio_buffer) % 10 == 0:
-                            logger.debug(f"Audio level: {audio_level:.2f}, threshold: {self.silence_threshold * 32767:.2f}")
-                        
                         if audio_level > self.silence_threshold * 32767:
                             if not self.recording:
                                 logger.info("Started recording")
