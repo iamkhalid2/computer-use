@@ -40,19 +40,40 @@ Core technical implementations include concurrent audio buffer management using 
 
 ## 🚀 Setup
 1. Clone the repository
-2. Create a `.env` file in the project root and add your Gemini API key:
+2. Create and activate a virtual environment:
+   ```bash
+   # On Windows
+   python -m venv venv
+   .\venv\Scripts\activate
+
+   # On Linux/MacOS
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+3. Create a `.env` file in the project root and add your Gemini API key:
    ```
    GOOGLE_API_KEY=your_api_key_here
    ```
-3. Install dependencies:
+4. Install dependencies:
    ```
    pip install -r requirements.txt
    ```
 
+> ⚠️ Note: Always make sure to activate the virtual environment before running the application.
+
 ## 🏃‍♂️ Running the Application
-```bash
-python voice_control.py
-```
+1. Activate the virtual environment if not already activated:
+   ```bash
+   # On Windows
+   .\venv\Scripts\activate
+
+   # On Linux/MacOS
+   source venv/bin/activate
+   ```
+2. Run the application:
+   ```bash
+   python voice_control.py
+   ```
 
 ## 💡 Usage Examples
 - "Open Spotify and play my favorite playlist"
