@@ -30,7 +30,7 @@ A Python-based AI agentic assistant that leverages Google's Gemini AI API for re
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd computer_control
+cd computer-use
 ```
 
 2. Create and activate a virtual environment:
