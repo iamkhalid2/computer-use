@@ -1,0 +1,34 @@
+[project]
+name = "pilot"
+version = "2.0.0"
+description = "A Mac-native, model-agnostic computer-use agent: slow planner, fast executor, reflex layer."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=2.3",
+    "openai>=1.60",
+    "pillow>=10.0",
+    "rich>=13.0",
+    "pyobjc-core>=11.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=11.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=11.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=11.0; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+pilot = "pilot.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
