@@ -229,6 +229,7 @@ class Toolbox:
         self.signal: tuple[str, dict[str, Any]] | None = None
         self.allow_host = False
         self.schemas: dict[str, dict[str, Any]] = {}  # tool name -> JSON schema, for argument coercion
+        self.events: list[dict[str, Any]] = []  # scaffold activations for the trace
 
     # -- helpers -------------------------------------------------------------------------
     def _pt(self, coord: Any) -> tuple[float, float] | None:
@@ -252,13 +253,16 @@ class Toolbox:
         if not self.env.use_ax:
             time.sleep(min(0.15, timeout))
             return
-        deadline = time.monotonic() + timeout
+        t0 = time.monotonic()
+        deadline = t0 + timeout
         while time.monotonic() < deadline:
             el = self.env.ax.attr(self.env.ax.system, "AXFocusedUIElement")
             role = self.env.ax.attr(el, "AXRole") if el is not None else None
             if role in self.EDITABLE or (role and self.env.ax.attr(el, "AXEditable")):
+                self.events.append({"name": "await_editable", "waited": round(time.monotonic() - t0, 3), "found": True})
                 return
             time.sleep(0.05)
+        self.events.append({"name": "await_editable", "waited": round(time.monotonic() - t0, 3), "found": False})
 
     def _choose_from_popup(self, node: Node, value: str) -> ToolResult | None:
         """Open a popup and press the matching menu item by its Accessibility title."""

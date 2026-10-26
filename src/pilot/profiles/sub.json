@@ -1,13 +1,14 @@
 {
   "name": "sub",
   "parent": null,
-  "created": "2026-10-25T20:45:18",
+  "created": "2026-10-26T12:21:36",
   "values": {
     "planner": "claude-code:claude-opus-5-5",
     "executor": "claude-code:claude-sonnet-5-5",
     "planner_effort": "medium",
     "executor_effort": "low",
     "executor_thinking": "auto",
+    "executor_coords": "auto",
     "planner_fallbacks": [],
     "executor_fallbacks": [],
     "plan": "lazy",
@@ -22,6 +23,7 @@
     "outline_max_lines": 180,
     "outline_max_chars": 8000,
     "compact_outline": true,
+    "context_budget": 20000,
     "settle_timeout": 1.5,
     "evidence_gate": true,
     "loop_window": 3,
@@ -41,8 +43,7 @@
       "impossible",
       "done",
       "terse"
-    ],
-    "executor_coords": "auto"
+    ]
   },
   "why": {
     "planner": "Opus 5.5 at medium effort sits on the Artificial Analysis speed/intelligence Pareto frontier (index 51, 21.7 s end to end, Oct 2026); runs on Khalid's Claude subscription via the official CLI.",
@@ -74,6 +75,7 @@
     "editable_timeout": "untuned: the default, never measured against alternatives",
     "paste_threshold": "untuned: the default, never measured against alternatives",
     "executor_rules": "all: `exact_url` added after the stale-tab failure (drag-sort round 2), `impossible`/`done` after the false done; this set scored 15/15 twice. Safety rules are always included and are not in this list.",
-    "executor_coords": "auto: Claude models use pixels; set by `pilot tune calibrate` for models whose convention differs (Gemini was measured to use 0-1000)."
+    "executor_coords": "auto: Claude models use pixels; set by `pilot tune calibrate` for models whose convention differs (Gemini was measured to use 0-1000).",
+    "context_budget": "20000: executor input grew 6.8k -> 51k tokens over 14 calls on the job form (each observing turn adds about 5k; old element lists are stale a turn later), and calls of 30k+ took a median 11.0 s vs 4.4 s under 15k. A restart passes the whole step's actions and the current screen; it fires on the largest single request's size, and only when history makes up half the budget. [accept runs: pilotbench-20261026-114218 accepted (job form 180k vs 446k tokens), revised; -115008 rejected 7 vs 8 (restart dropped the step's first read), fixed; -120823 accepted 8 vs 7 (job form 272k vs 1.2M tokens, 95 s vs 472 s). Evidence is n=1 per task: re-check with --repeat 2]"
   }
 }

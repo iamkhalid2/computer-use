@@ -508,3 +508,72 @@ def test_popup_option_is_chosen_through_accessibility(monkeypatch, tmp_path):
     _, _, results, _ = executor.logs[0][1]
     assert results[0].ok and "Chose 'Kenya'" in results[0].text and state["value"] == "Kenya"
     assert (items["Kenya"], "AXPress") in env.ax.performed and env.input.log == []  # no pixel clicks at all
+
+
+def used(t, tokens):
+    from pilot.types import Usage
+
+    t.usage = Usage(input_tokens=tokens)
+    return t
+
+
+def test_context_budget_restarts_the_session_from_a_text_history(monkeypatch, tmp_path):
+    click = lambda: call("computer", action="left_click", coordinate=[10, 10])  # noqa: E731
+    executor = FakeProvider(ModelSpec("fake", "executor-model"), sessions=[
+        [used(turn(click()), 7000), used(turn(click()), 12000)],  # over budget after the second turn
+        [turn(call("done", summary="x", success=True))],  # started early (warm), used for the restart
+    ])
+    agent, env = make(monkeypatch, tmp_path, None, executor, context_budget=10000)
+    out = agent.run("click twice")
+    assert out.success
+    first, fresh = executor.logs
+    assert [e[0] for e in first] == ["send", "reply"]  # no third turn on the grown session
+    kind, parts = fresh[0]
+    lead = parts[0].text
+    assert kind == "send" and isinstance(parts[1], ImagePart) and lead.endswith("Current screen:")
+    assert "Actions so far in this step" in lead and "\n1. computer" in lead and "\n2. computer" in lead and "Task: click twice" in lead
+    assert "did not visibly change" in lead  # pending harness notes survive the restart
+    events = (next(tmp_path.glob("*/events.jsonl"))).read_text()
+    assert '"context_rotate"' in events and '"tokens": 12000' in events
+
+
+def test_no_budget_means_one_session_per_step(monkeypatch, tmp_path):
+    click = lambda: call("computer", action="left_click", coordinate=[10, 10])  # noqa: E731
+    executor = FakeProvider(ModelSpec("fake", "executor-model"), sessions=[
+        [used(turn(click()), 50000), used(turn(click()), 90000), turn(call("done", summary="x", success=True))]])
+    agent, env = make(monkeypatch, tmp_path, None, executor)
+    assert agent.run("click twice").success and len(executor.logs) == 1
+
+
+def test_no_restart_when_the_first_call_is_already_over_budget(monkeypatch, tmp_path):
+    # A big first screen (a long element list) costs the same in a fresh session: restarting saves nothing.
+    click = lambda: call("computer", action="left_click", coordinate=[10, 10])  # noqa: E731
+    executor = FakeProvider(ModelSpec("fake", "executor-model"), sessions=[
+        [used(turn(click()), 21000), used(turn(click()), 23000), turn(call("done", summary="x", success=True))]])
+    agent, env = make(monkeypatch, tmp_path, None, executor, context_budget=20000)
+    assert agent.run("click twice").success and len(executor.logs) == 1
+
+
+def test_restart_trigger_reads_context_not_summed_retries(monkeypatch, tmp_path):
+    # The CLI sums usage over its own retries: 70k "used" but each request saw 12k. No restart.
+    click = lambda: call("computer", action="left_click", coordinate=[10, 10])  # noqa: E731
+    big = used(turn(click()), 70000)
+    big.context = 12000
+    executor = FakeProvider(ModelSpec("fake", "executor-model"), sessions=[
+        [used(turn(click()), 7000), big, turn(call("done", summary="x", success=True))]])
+    agent, env = make(monkeypatch, tmp_path, None, executor, context_budget=20000)
+    assert agent.run("click twice").success and len(executor.logs) == 1
+
+
+def test_restart_keeps_the_first_reads_of_a_long_step(monkeypatch, tmp_path):
+    reads = [used(turn(call("shell", command="cat ~/PilotEval/applicant.txt")), 7000)]
+    clicks = [used(turn(call("computer", action="left_click", coordinate=[10, 10 + i])), 8000 + 1000 * i) for i in range(15)]
+    clicks[-1].usage.input_tokens = 30000
+    executor = FakeProvider(ModelSpec("fake", "executor-model"), sessions=[
+        reads + clicks, [turn(call("done", summary="x", success=True))]])
+    monkeypatch.setattr(runner_mod.apps, "shell", lambda cmd, timeout=30: SimpleNamespace(ok=True, output="Country: Kenya", code=0))
+    agent, env = make(monkeypatch, tmp_path, None, executor, context_budget=20000, max_step_turns=40)
+    agent.run("Fill the form using ~/PilotEval/applicant.txt")
+    lead = executor.logs[1][0][1][0].text
+    lines = [ln for ln in lead.splitlines() if ln[:1].isdigit()]
+    assert len(lines) > 12 and lines[0].startswith("1. shell") and "Country: Kenya" in lines[0]  # more than a frame's 12, the read first

@@ -109,6 +109,8 @@ KNOBS: dict[str, Knob] = {k.name: k for k in [
     Knob("outline_max_lines", "observation", "int", 180, "element list: most elements shown", lo=30, hi=500),
     Knob("outline_max_chars", "observation", "int", 8000, "element list: most characters", lo=1500, hi=24000),
     Knob("compact_outline", "observation", "bool", True, "drop duplicate rows (row > cell > text with the same label)"),
+    Knob("context_budget", "observation", "int", 0, "executor input tokens before its session restarts from a text history "
+         "and the current screen (0: never; old screenshots and element lists are otherwise resent every turn)", lo=0, hi=200000),
     Knob("settle_timeout", "observation", "float", 1.5, "seconds to wait for the screen to stop changing before a screenshot", lo=0.0, hi=4.0),
     # scaffold: harness behaviours a smarter model may not need
     Knob("evidence_gate", "scaffold", "bool", True, "on write tasks, show the disk state before accepting done"),

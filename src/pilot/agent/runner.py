@@ -30,7 +30,10 @@ from ..safety import Aborted, Policy, TaskScope
 from ..tools import MUTATING, Toolbox, build_specs
 from ..trace import Trace
 from ..types import AssistantTurn, Observation, Part, TextPart, ToolResult
-from ..replay.record import DecisionRecorder
+from ..replay.record import DecisionRecorder, history_text
+
+ROTATE_HISTORY = 60  # actions a restarted session is told about
+ROTATE_RESULT = 600  # characters kept of each action's result
 from . import prompts
 
 
@@ -158,11 +161,12 @@ class Agent:
         if c is None:
             spec = self.s.planner if role != "executor" and self.s.planner else self.s.executor
             c = cost_of(spec.model, turn.usage)
-        self.trace.stats.model(role, turn.latency, c, turn.usage.input_tokens + turn.usage.cache_read, turn.usage.output_tokens)
+        self.trace.stats.model(role, turn.latency, c, self.used(turn), turn.usage.output_tokens)
         self.trace.log(
             "model", role=role, model=turn.model, latency=round(turn.latency, 3), stop=turn.stop, text=turn.text[:2000],
             notes=turn.notes, calls=[{"name": c_.name, "args": c_.args} for c_ in turn.calls],
-            **{"in": turn.usage.input_tokens + turn.usage.cache_read, "out": turn.usage.output_tokens, "cache_read": turn.usage.cache_read},
+            **{"in": self.used(turn), "out": turn.usage.output_tokens, "cache_read": turn.usage.cache_read,
+                 "cache_write": turn.usage.cache_write, "ctx": turn.context},
         )
         self.r.model(role, turn.latency, turn.text)
         return turn
@@ -225,9 +229,41 @@ class Agent:
             text = f"Earlier in this session: {context}\n\n{text}"
         return text + "\n\nCurrent screen:"
 
+    @staticmethod
+    def used(turn: AssistantTurn) -> int:
+        u = turn.usage
+        return u.input_tokens + u.cache_read + u.cache_write
+
+    @classmethod
+    def context(cls, turn: AssistantTurn) -> int:
+        """How big the model's context is now: what a restart could shrink (not what the turn cost)."""
+        return turn.context or cls.used(turn)
+
+    def _spare(self) -> Any:
+        """A session started ahead of need, so a restart doesn't wait for the CLI to boot."""
+        spare, self.standby = self.standby, None
+        return spare or self.executor.session(self.system, self.tools)
+
+    def _warm(self, turn: AssistantTurn, fresh_in: int = 0) -> None:
+        budget = self.s.profile.context_budget
+        if budget and self.standby is None and self.context(turn) > 0.6 * budget and self.context(turn) - fresh_in >= 0.3 * budget:
+            self.standby = self.executor.session(self.system, self.tools)  # boots while the actions run
+
+    def rotated_lead(self, brief: str, notes: list[str]) -> str:
+        """The step brief, every action so far with its result, and pending harness notes: what a
+        fresh session needs to carry on. Old screenshots and element lists are dropped (ids are
+        renumbered every turn, so old lists can only mislead)."""
+        head = brief.removesuffix("\n\nCurrent screen:")
+        # The whole step, not the last few actions: the first ones are often the reads that carry the
+        # task's data (a restart once dropped `cat applicant.txt` and re-read it, disoriented).
+        hist = history_text({"history": self.recorder.history[-ROTATE_HISTORY:]}, result_chars=ROTATE_RESULT)
+        text = head + ("\n\nActions so far in this step (most recent last):\n" + hist if hist else "")
+        text += "".join(f"\n{n}" for n in notes)
+        return text + "\n\nCurrent screen:"
+
     def run_step(self, task: str, steps: list[Step], i: int, obs: Observation, context: str) -> StepResult:
         planner_mode = self.planner is not None
-        session = self.executor.session(self.system, self.tools)
+        session = self._spare()
 
         def on_note(n: str) -> None:
             self.r.note(n)
@@ -240,6 +276,7 @@ class Agent:
         rec.before(self.cur_image, self.cur_text)
         turn = self._record("executor", session.send(self.screen_parts(obs, brief)))
         rec.after(turn)
+        fresh_in = self.context(turn)  # what a restart costs anyway: only growth beyond it can be saved
         self.turns += 1
         step_turns = 1
         nudged = False
@@ -255,6 +292,7 @@ class Agent:
                     nudged = True
                     self._check_budget()
                     msg = "Continue: act with tools, or call `done`" + (" or `escalate`." if planner_mode else ".")
+                    self.trace.log("scaffold", name="nudge")
                     rec.flush()
                     rec.before(self.cur_image, self.cur_text, [msg])
                     turn = self._record("executor", session.send([TextPart(msg)]))
@@ -287,6 +325,9 @@ class Agent:
                     if res.observation:  # a screenshot: this is now what the model sees
                         self.cur_image, self.cur_text = ev["image"], res.observation
                 self.trace.log("action", **ev)
+                for sev in self.toolbox.events:  # scaffold activations inside tools (e.g. waiting for an editable field)
+                    self.trace.log("scaffold", **sev)
+                self.toolbox.events.clear()
                 if call.name not in {"done", "escalate"}:
                     self.r.action(call.name, call.args, res.ok, res.text, dt)
                 results.append(res)
@@ -323,9 +364,10 @@ class Agent:
             if planner_mode and step_turns > self.s.profile.max_step_turns:
                 return StepResult("escalate", reason=f"no completion after {self.s.profile.max_step_turns} turns on this step")
             extra: list[Part] = []
+            latest: Observation | None = None
             took_shot = any(r.image is not None for r in results)
             if self.s.profile.auto_observe and mutated and not took_shot:
-                new = self.observe("after")
+                new = latest = self.observe("after")
                 target = results[-1] if results and results[-1].ok and results[-1].image is None else None
                 if target is not None:
                     target.image, target.observation = new.image, "Screen after your actions:\n" + new.text()
@@ -333,19 +375,39 @@ class Agent:
                     extra += [TextPart("Screen after your actions:"), new.image, TextPart(new.text())]
                 if new.hash == prev_hash and prof.no_change_note:
                     extra.append(TextPart("Note: the screen did not visibly change after these actions."))
+                    self.trace.log("scaffold", name="no_change_note")
                 prev_hash = new.hash
             sig = json.dumps([(c.name, c.args) for c in turn.calls], sort_keys=True, default=str)
             recent.append(sig)
             if prof.loop_window and len(recent) == prof.loop_window and len(set(recent)) == 1:
                 times = {2: "twice", 3: "three times", 4: "four times"}.get(prof.loop_window, f"{prof.loop_window} times")
+                self.trace.log("scaffold", name="loop_note")
                 extra.append(TextPart(f"You have repeated the same actions {times}. They are not working: change approach"
                                       + (" or escalate." if planner_mode else ".")))
             if prof.budget_warning and planner_mode and step_turns == prof.max_step_turns - 2:
                 extra.append(TextPart("Two turns left for this step: finish with `done` or `escalate`."))
+                self.trace.log("scaffold", name="budget_warning")
             self._check_budget()
-            rec.before(self.cur_image, self.cur_text, [p.text for p in extra if isinstance(p, TextPart)])
-            turn = self._record("executor", session.reply(turn.calls, results, extra))
+            notes = [p.text for p in extra if isinstance(p, TextPart)]
+            if prof.context_budget and self.context(turn) > prof.context_budget and self.context(turn) - fresh_in >= prof.context_budget / 2:
+                # Restart from a compact text history and the current screen instead of resending
+                # every old screenshot: at 30k+ tokens a call takes about twice as long.
+                before = self.context(turn)
+                if hasattr(session, "close"):
+                    session.close()
+                session = self._spare()
+                session.on_note = on_note
+                latest = latest or self.observe("rotate")
+                kept = [n for n in notes if not n.startswith("Screen after your actions")]
+                self.trace.log("scaffold", name="context_rotate", tokens=before, history=len(rec.history))
+                rec.before(self.cur_image, self.cur_text, kept)
+                turn = self._record("executor", session.send(self.screen_parts(latest, self.rotated_lead(brief, kept))))
+                fresh_in = self.context(turn)
+            else:
+                rec.before(self.cur_image, self.cur_text, notes)
+                turn = self._record("executor", session.reply(turn.calls, results, extra))
             rec.after(turn)
+            self._warm(turn, fresh_in)
             self.turns += 1
 
     def _reflex_reject(self, step: Step) -> str | None:
@@ -375,6 +437,7 @@ class Agent:
                                          tools=[t.name for t in self.tools], planner_mode=self.planner is not None)
         self.t0 = time.monotonic()
         self.turns = 0
+        self.standby: Any = None
         self.advice = ""
         self.planned = False
         # Authorisation comes from the user's own words for this task, never from the screen.
@@ -481,6 +544,9 @@ class Agent:
         except Exception as e:
             reason = f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e)
         seconds = time.monotonic() - self.t0
+        if self.standby is not None and hasattr(self.standby, "close"):
+            self.standby.close()
+            self.standby = None
         report = self.trace.finish({"success": success, "answer": answer, "summary": summary, "reason": reason,
                                     "steps": [vars(x) for x in steps]})
         self.r.final(success, answer, summary if success else reason, self.trace.stats, seconds, str(report))

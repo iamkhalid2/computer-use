@@ -242,6 +242,7 @@ class ClaudeCodeSession(Session):
         self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
         texts: list[str] = []
+        context = 0
         native: list[dict[str, Any]] = []  # actions the model tried to call as tools
         while True:
             remaining = self.timeout - (time.monotonic() - t0)
@@ -262,6 +263,10 @@ class ClaudeCodeSession(Session):
             if kind == "system" and ev.get("subtype") == "api_retry" and self.on_note:
                 self.on_note(f"API retry {ev.get('attempt')} ({ev.get('error')})")
             elif kind == "assistant":
+                u = (ev.get("message") or {}).get("usage") or {}
+                # The result's usage sums every request the CLI made for this turn (its own retries
+                # included); the context the model actually saw is the largest single request.
+                context = max(context, sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")))
                 for block in (ev.get("message") or {}).get("content") or []:
                     if block.get("type") == "text" and block.get("text"):
                         texts.append(block["text"])
@@ -269,6 +274,7 @@ class ClaudeCodeSession(Session):
                         native.append({"tool": block["name"], "args": block.get("input") or {}})
             elif kind == "result":
                 turn = result_to_turn(ev, time.monotonic() - t0, self.p.spec.model)
+                turn.context = context
                 data = ev.get("structured_output")
                 if data is None:
                     try:

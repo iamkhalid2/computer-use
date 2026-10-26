@@ -81,9 +81,18 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     awake = KeepAwake().__enter__()
     record_preexisting()
     os.environ.setdefault("PILOT_BROWSER", "Safari")  # web fixtures open in Safari, never in the user's browser
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"pilotbench-{datetime.now():%Y%m%d-%H%M%S}.json"
+    streak = 0
+
+    def save(rows: list[dict[str, Any]]) -> None:  # after every run, so a crash keeps what was measured
+        path.write_text(json.dumps(rows, indent=2))
+
     try:
-        for preset in presets:
-            for task in tasks:
+        # Task by task, alternating which profile goes first: profiles compared back to back see the
+        # same model latency, and neither always gets the warm app the other one just opened.
+        for ti, task in enumerate(tasks):
+            for preset in (presets if ti % 2 == 0 else presets[::-1]):
                 for n in range(repeat):
                     kw = {**overrides, "interactive": False, "approve": overrides.get("approve") or "risky",
                           "write_roots": [str(Ctx(server).sandbox)]}
@@ -98,7 +107,15 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                     if screen_locked():
                         c.print("[red]The Mac is locked. Stopping: runs on a locked screen measure nothing.[/]")
                         raise _Stop()
-                    task.setup(ctx)
+                    try:
+                        task.setup(ctx)
+                    except Exception as e:  # a hung app or fixture is the bench's failure, not the agent's
+                        rows.append({"invalid": True, "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": False,
+                                     "detail": f"setup failed: {type(e).__name__}: {str(e)[:160]}", "claimed": None, "seconds": 0,
+                                     "model_calls": 0, "model_seconds": 0, "actions": 0, "escalations": 0, "cost": None, "report": None})
+                        c.print(f"[yellow]INVALID[/] setup failed: {type(e).__name__}: {str(e)[:120]}")
+                        save(rows)
+                        continue
                     time.sleep(0.4)
                     out = Agent(settings, env, Reporter(), Jev()).run(task.render(ctx))
                     ctx.answer = " ".join(x for x in (out.answer, out.summary, out.reason) if x)
@@ -118,8 +135,14 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                         "claimed": out.success, "seconds": round(out.seconds, 1), "model_calls": out.stats.model_calls,
                         "model_seconds": round(out.stats.model_seconds, 1), "actions": out.stats.actions,
                         "escalations": out.stats.escalations, "cost": round(out.stats.cost, 4) if out.stats.cost_known else None,
+                        "tokens_in": int(sum(r.get("in", 0) for r in out.stats.by_role.values())),
                         "report": out.report,
                     })
+                    save(rows)
+                    streak = streak + 1 if invalid else 0
+                    if streak >= 3:
+                        c.print("[red]Three infrastructure failures in a row (network or provider down). Stopping.[/]")
+                        raise _Stop()
                     label = "INVALID" if invalid else ("PASS" if ok else "FAIL")
                     if out.reason.startswith("Claude plan usage limit"):
                         c.print(f"[red]{out.reason}. Stopping: every further run would fail the same way.[/]")
@@ -130,9 +153,7 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     finally:
         server.stop()
         awake.__exit__()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"pilotbench-{datetime.now():%Y%m%d-%H%M%S}.json"
-    path.write_text(json.dumps(rows, indent=2))
+    save(rows)
     report(rows, presets, tasks, c)
     c.print(f"[dim]Results: {path}[/]")
     return path

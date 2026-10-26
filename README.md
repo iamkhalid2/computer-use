@@ -24,7 +24,7 @@ Today it runs on Claude through the official Claude Code CLI with your own subsc
 3. [Using it](#using-it)
 4. [Models and providers](#models-and-providers)
 5. [Profiles: the harness genome](#profiles-the-harness-genome)
-6. [Self-tuning: `pilot tune calibrate`](#self-tuning-pilot-tune-calibrate)
+6. [Self-tuning: `pilot tune calibrate`](#self-tuning-pilot-tune-calibrate) · [`ablate` and `audit`](#pruning-scaffolds-pilot-tune-ablate-and-audit) · [`mine`, `propose`, `accept`](#the-improvement-loop-mine-propose-accept) · [`context_budget`](#bounded-executor-context-context_budget)
 7. [Measuring it](#measuring-it): PilotBench · replay evals · run reports
 8. [Results](#results)
 9. [Safety](#safety)
@@ -168,6 +168,80 @@ Calibration measures a model as the executor, entirely without the screen (synth
 
 Safety results are reported per effort but never traded.
 
+## Pruning scaffolds: `pilot tune ablate` and `audit`
+
+```bash
+pilot tune ablate --profile sub --frames 24 --budget 240   # replay only; writes a candidate profile if anything can go
+pilot tune audit                                            # how often each across-turn scaffold fired, and whether it mattered
+```
+
+Scaffolding written for one model is dead weight for a better one, so the harness measures it away. Knobs that change a single decision's input (optional prompt rules, element-list length) are tested by **replay ablation** on recorded decisions:
+
+1. **Baseline twice.** Items that disagree with themselves are noise and set aside.
+2. **Blind control.** The same items with a gray screenshot and no element list. If the set can't tell a blind model from the baseline, it can't tell anything, and nothing is proposed.
+3. **Element-list length**, then **prompt rules by bisection** (group testing: drop a group, split it only if something was lost). Accepted changes are cumulative, so the last accepted test *is* the candidate, tested whole. Rules that guard a known failure (say, `impossible` for faking success) are only cleared if a stable hard item of that failure is in the set.
+4. **No element list** is run for information only. The list's value is in execution (exact presses, `set_value`), which single-decision replay can't see. For the same reason, rules about behaviour across turns (`batching`, `check_after`, `action_priority`) are never proposed for removal from replay. Only `pilot eval` can test them.
+
+A variant passes if it keeps every hard item and loses at most `--tolerance` soft ones. The candidate cites the smallest loss the run could have detected and must be confirmed with `pilot eval` before use.
+
+Scaffolds that act across turns (disk check before done, loop and no-change notes, budget warning, nudge, waiting for editable fields) can't be replayed as one decision. **`audit`** reads their logged activations from `runs/` instead: how often each fired, and whether the model changed course afterwards. Zero catches in *n* fires only bounds the catch rate below 3/*n* (the rule of three), so a check for a rare failure can look useless and still pay for itself.
+
+What building it taught:
+
+* **Most recorded decisions can be answered without looking.** A blind model matched 10 of 11 soft items on the first set, because first-turn decisions (`open` this URL, `shell`, `done` after the history shows completion) follow from the task text. Forbid-only safety items pass blind too. The first ablation therefore "found" that every rule and the element list could go. The set is now built from **grounded** decisions (a `ui` press, a click or drag at a point), where a blind model drops to half the baseline.
+* **Single samples are noisy at low effort.** Sonnet 5.5 (low) clicked "Allow" on the same permission dialog in 3 of 5 identical replays. The live consent guard blocks it, and the repeated baseline now sets such items aside.
+* **Bisection finds real dependencies.** On the `sub` profile (24 grounded decisions, 240 calls), a stale-state hard item failed in all 3 tests that removed `impossible`/`done`/`terse` and passed in all 7 that kept them. Those rules stay.
+* **Replay can't see what happens across turns; PilotBench can.** Replay found no loss from dropping the other six optional rules (about 340 prompt tokens per call). PilotBench then ran the lean candidate against `sub`, back to back on the same day. Both passed 16/16. But the lean profile needed **75 model calls against 65, 107 actions against 92, 2 escalations against 1, and $1.16 against $1.00**. On the job-application form, without "don't request a screenshot just to look" and "change approach instead of repeating it", the executor made 9 waits and 8 zooms (against 0 and 5) and retried the date field three ways before escalating. **Rejected.** Those rules now count as across-turn rules, and replay won't propose them again.
+* **Wall-clock time is the noisiest Pareto axis.** The same `sub` profile took 229 s one day and 503 s the next with nearly the same number of calls: model latency doubled. Comparisons run back to back, and calls and actions (independent of latency) decide close cases.
+* **The disk check before done fired 35 times and never changed the outcome**, so its catch rate is under about 9%. It stays on: the failure it guards (a rename that never committed) was real, and it costs one turn on write tasks only.
+
+## The improvement loop: `mine`, `propose`, `accept`
+
+```bash
+pilot tune mine                                   # waste clusters from the newest 3 bench rounds (dev split)
+pilot tune propose --profile sub                  # one planner call: typed single-knob candidates + harness notes
+pilot tune accept profiles/sub-<knob>-<id>.json   # sealed tasks + red-team, pre-registered rule; --adopt writes it into sub
+```
+
+Once every task passes, failures are too rare to steer by, so the loop steers by **waste**: the turns, seconds and tokens a run spent on nothing.
+
+* **A sealed split.** Bench tasks are split once by a salted hash, stratified by axis: 8 `dev` tasks (the only ones mining and the proposer ever read), 4 sealed `test` tasks, and the 4 red-team tasks as a safety `gate` that is never optimised against. Older runs without a bench row are matched to tasks by their text, with only the fixture port masked, so a sealed task can't slip in under another name.
+* **`mine`** reads raw `events.jsonl`, not reports. It classifies safety refusals, tool errors (messages normalised), turns that only looked, repeated turns, escalations, editable-field timeouts and context growth, and ranks the clusters by turns lost with raw examples. It reads only recent rounds by default, since older traces describe an older harness. Full history shows the `done needs success` and `curl` clusters stopped once those fixes landed.
+* **`propose`** sends the clusters, the knob registry (type, range, meaning, current value) and the experiment ledger to the planner model. It returns single-knob proposals, validated by type, range and whether they actually change anything, plus harness notes for waste no knob can fix. Models, coordinate conventions, invariants and knobs the provider ignores are not offered.
+* **`accept`** runs candidate and base task by task, alternating which goes first, on the sealed and gate tasks. The rule is written to the ledger before the first run: pass every red-team task and as many tasks as the base, and either pass more or cut model calls by at least max(1, 5%) with actions no more than 5% higher. Calls and actions decide because they don't move with model latency.
+* **The ledger** (`profiles/ledger.jsonl`, tracked) is the loop's memory: every proposal, test and verdict, so a rejected idea isn't proposed again without new evidence.
+
+First live pass on `sub` (35 dev runs, 149 executor calls):
+
+* **The proposer's first idea was a no-op.** It proposed `keep_images` 3 → 2, but the `claude-code` provider keeps its own context and ignores that knob. Benchmarking it would have measured noise, and with one run per task noise can pass. Providers now declare which provider-dependent knobs they honour, and inert ones are hidden. The candidate is recorded as withdrawn.
+* **With the registry corrected, it proposed no knob change.** It wrote four harness notes instead:
+  * a tool bug, fixed: `open` treated `x-apple.systempreferences:` deep links as app names (5 failures in 5 runs). Settings and help deep links now open as URLs, while `tel:`, `facetime:`, `sms:` and `mailto:` still don't, because they place calls or start messages;
+  * read-only `for` loops refused by the shell safety check. That is for a human to decide, and it is left as is;
+  * non-zero exits with useful output. Not changed: output merges stdout and stderr, so treating such exits as success would hide real failures;
+  * **context growth**, the biggest lever found so far: executor input grows 7–9k tokens per turn because the CLI session keeps every screenshot (12k tokens per call on average, 51k by turn 14 on the job form).
+
+## Bounded executor context: `context_budget`
+
+The `claude-code` provider runs one CLI conversation per step, and the CLI keeps everything: every screenshot and every element list is resent on every later call. Measured from the traces:
+
+* **Where the tokens go.** A turn that brings a fresh observation adds about 5.2k input tokens: the screenshot (about 1.9k), the element list (about 1.6k for 6k characters) and the results. On the job form, input grew from 6.8k to 51k tokens over 14 calls. The old element lists are pure dead weight: ids are renumbered every turn.
+* **What it costs.** Executor calls with 30k or more input tokens took a median **11.0 s**, against **4.4 s** for later calls under 15k. A fresh CLI session costs about 1.7 s once (6.1 s for a session's first call against 4.4 s).
+
+With `context_budget` set, once a call's input passes the budget the next turn starts a fresh session. That session gets the step brief, every action so far with its result (the same format replay frames use), any pending harness notes, and the current screen. A spare session is started once input passes 60% of the budget, so the CLI boots while actions run. Each restart is logged as a `context_rotate` scaffold event. The trace now counts cache writes in input tokens, which it previously left out, so each turn's new content was invisible until the next call.
+
+`sub` now ships with `context_budget` = 20000, adopted through `pilot tune accept` on the third run (below). That rule now also counts input tokens: a cut of at least 15% counts as a gain only if calls and actions don't rise beyond max(1, 5%).
+
+The candidate went through `accept` three times. Each run caught something the one before had missed:
+
+| Run | Verdict | What the traces showed |
+|---|---|---|
+| 1 | accepted: 8/8 both, calls 30 vs 33, actions 43 vs 59 | Job form: **input tokens 180k vs 446k, largest call 29k vs 98k, 59 s vs 93 s**. But on two red-team tasks the session's *first* call was already over budget and it restarted with nothing to drop (3 calls vs 1). Fixed: restart only when growth beyond the session's first call is at least half the budget. Not adopted, because the fix changed what was tested. |
+| 2 | **rejected**: 7 vs 8 (job form, wrong country) | The restart kept only the last 12 actions and dropped the first, `cat applicant.txt`. The fresh session re-read it and pressed Escape on the country popup the old session had just opened, and never recovered. The trigger was also reading the CLI's *summed* usage, which counts its internal retries (30k → 70k in one turn), not the context size. |
+
+| 3 | **accepted and adopted**: 8 vs 7 | Both fixed: a restarted session gets the whole step (up to 60 actions, 600 characters of each result), and the trigger reads the largest single request of the turn, which the CLI reports per request and is now logged as `ctx`. On the job form, the candidate restarted 3 times and passed with **14 calls, 272k tokens, 95 s**. The base failed it (wrong start date) after **39 calls, 1.2M tokens, 472 s**. Short tasks never restarted and were unchanged. |
+
+Read this with care: acceptance hinged on one base failure, at one run per task. Across the three runs on the job form, each side passed 2 of 3 (the candidate's failure was the bug since fixed). Where both passed, the candidate used 60–78% fewer input tokens and finished faster. So the token and latency gain is consistent, and the success gain is not yet shown. **The rule needs repeats.** One flaky task can carry "passed more", so the next step is `--repeat 2` as the default for `accept`, before the loop is trusted to adopt changes on its own.
+
 ## Measuring it
 
 ### PilotBench: graded by end state
@@ -265,8 +339,8 @@ src/pilot/
   providers/        claude_code.py (subscription via the CLI) · anthropic_provider.py · openai_compat.py · jev.py
   evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis
   replay/           decision recording, dataset builder, meaning-based grader, curated hard items, runner
-  tune/             calibration: synthetic probes, effort sweep, profile writer
-profiles/           calibrated profiles written by `pilot tune`
+  tune/             calibrate (probes, effort sweep) · ablate (replay bisection, trace audit) · mine · propose · accept
+profiles/           calibrated profiles written by `pilot tune`, and ledger.jsonl (every experiment and verdict)
 tests/              offline tests: fake Mac, scripted models, fake CLI (`uv run --group dev pytest`)
 ```
 
@@ -282,7 +356,7 @@ Things the benchmark and traces taught, each now handled by the harness:
 * **Models have hidden image budgets.** Haiku 5.5 via the CLI answered in a screenshot silently shrunk by 0.926; calibration detects this and resizes.
 * **Over-blocking is a reliability bug.** Refusing `cd`, a URL the user gave, or the Submit button the user asked for forced slow GUI detours. Authorisation now comes from the user's own words.
 * **Some judgements must stay outside the model.** Asked cold, Claude clicked "Don't Allow" on a permission prompt; only the harness guard stops that. Safety stays invariant.
-* **Infrastructure failures are not agent failures.** Locked screens, provider outages and usage limits are detected and excluded from scores.
+* **Infrastructure failures are not agent failures.** Locked screens, provider outages, usage limits and fixture setup that hangs (Notes once stopped answering AppleScript mid-bench) are marked invalid and excluded from scores. Three in a row stop the run, and results are saved after every task, so a crash keeps what was measured.
 
 ## Known limits and roadmap
 
@@ -291,7 +365,7 @@ Things the benchmark and traces taught, each now handled by the harness:
 * Older traces lack element lists, so they replay screenshot-only; new runs record everything.
 * Jev (TypeSafe) support is experimental and off by default.
 
-Next steps toward the self-mutating harness: `pilot tune ablate` (switch each scaffold off and keep only what pays), `pilot tune propose` (a strong model reads failure clusters and proposes profile changes, accepted only on held-out evidence with no safety regression), a sealed test split refreshed from real use, and a background-browser body for web tasks.
+Next steps toward the self-mutating harness: make `accept` repeat each task (one flaky base failure carried the `context_budget` decision); grow the grounded replay set (only 26 recorded grounded decisions exist so far; every new run adds more), repeat each ablation test rather than trusting one sample, a sealed test split refreshed from real use, and a background-browser body for web tasks.
 
 ## License
 

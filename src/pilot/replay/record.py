@@ -18,6 +18,15 @@ from ..types import AssistantTurn, ToolCall, ToolResult
 HISTORY = 12  # most recent actions kept in a frame
 
 
+def history_text(frame: dict[str, Any], result_chars: int = 300) -> str:
+    """The actions so far, one line each: what replay frames and rotated executor sessions show."""
+    lines = []
+    for i, h in enumerate(frame.get("history") or [], 1):
+        args = json.dumps(h.get("args") or {}, ensure_ascii=False)[:200]
+        lines.append(f"{i}. {h.get('name')} {args} → {'ok' if h.get('ok') else 'ERROR'}: {str(h.get('result', ''))[:result_chars]}")
+    return "\n".join(lines)
+
+
 def prompt_hash(text: str) -> str:
     return hashlib.blake2b(text.encode(), digest_size=6).hexdigest()
 
@@ -73,7 +82,7 @@ class DecisionRecorder:
         done = []
         for c in calls:
             r = by_id.get(c.id)
-            item = {"name": c.name, "args": c.args, "ok": bool(r and r.ok), "result": (r.text if r else "not executed")[:400]}
+            item = {"name": c.name, "args": c.args, "ok": bool(r and r.ok), "result": (r.text if r else "not executed")[:600]}
             done.append(item)
             self.history.append(item)
         if self.pending is not None:

@@ -14,6 +14,9 @@ from pathlib import Path
 
 URL_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
 DOMAIN_RE = re.compile(r"^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(/\S*)?$", re.I)
+# Deep links without "//" that only open a settings pane or help page. Others of that shape (tel:,
+# facetime:, sms:, mailto:) place calls or start messages, so they stay unopenable by name.
+DEEP_LINK_RE = re.compile(r"^(x-apple\.systempreferences|x-apple-helpviewer):\S", re.I)
 
 
 @dataclass
@@ -48,8 +51,8 @@ def open_target(target: str, app: str | None = None) -> RunResult:
     """Open an app by name, a URL, or a file/folder path."""
     t = target.strip()
     expanded = os.path.expanduser(t)
-    if URL_RE.match(t) or DOMAIN_RE.match(t):
-        url = t if URL_RE.match(t) else f"https://{t}"
+    if URL_RE.match(t) or DOMAIN_RE.match(t) or DEEP_LINK_RE.match(t):
+        url = t if URL_RE.match(t) or DEEP_LINK_RE.match(t) else f"https://{t}"
         cmd = ["open", "-a", app, url] if app else ["open", url]
     elif Path(expanded).exists():
         cmd = ["open", "-a", app, expanded] if app else ["open", expanded]

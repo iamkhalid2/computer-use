@@ -78,6 +78,7 @@ class AssistantTurn:
     latency: float = 0.0
     model: str = ""
     detail: str = ""
+    context: int = 0  # input tokens of the turn's largest single request (0: unknown, use usage)
 
 
 @dataclass

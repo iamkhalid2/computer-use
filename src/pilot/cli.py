@@ -304,8 +304,15 @@ def cmd_profile(argv: list[str]) -> int:
 
 def cmd_tune(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="pilot tune", description="Adapt the harness to a model")
-    p.add_argument("action", choices=["calibrate"])
-    p.add_argument("model", help="provider:model to calibrate as the executor, e.g. claude-code:claude-haiku-5-5")
+    p.add_argument("action", choices=["calibrate", "ablate", "audit", "mine", "propose", "accept"])
+    p.add_argument("model", nargs="?", help="calibrate: provider:model to calibrate as the executor · accept: the candidate profile")
+    p.add_argument("--profile", default="sub", help="ablate, propose: the profile to improve")
+    p.add_argument("--scope", default="dev", choices=["dev", "test", "gate", "all"], help="mine: which split to read")
+    p.add_argument("--rounds", default="3", help="mine, propose: newest bench rounds to read, or 'all'")
+    p.add_argument("--proposer", default=None, help="propose: provider:model (default: the profile's planner)")
+    p.add_argument("--repeat", type=int, default=1, help="accept: runs per task and profile")
+    p.add_argument("--adopt", action="store_true", help="accept: write an accepted change into the base profile")
+    p.add_argument("--budget", type=int, default=120, help="ablate: most model calls to spend")
     p.add_argument("--base", default="sub", help="profile to derive from")
     p.add_argument("--name", default=None, help="name of the new profile")
     p.add_argument("--efforts", default="low,medium")
@@ -324,6 +331,87 @@ def cmd_tune(argv: list[str]) -> int:
     from .replay import frames as fr
     from .tune.calibrate import CalibrationConfig, calibrate
 
+    if args.action in {"mine", "propose"}:
+        from .evals.tasks import TASKS
+        from .tune.mine import mine
+
+        rounds = None if args.rounds == "all" else int(args.rounds)
+        mined = mine(Path("runs"), Path("evals"), TASKS, "dev" if args.action == "propose" else args.scope, rounds)
+        calls = mined["executor_calls"] or 1
+        print(f"Mined {mined['runs']} {mined['scope']} runs ({'all history' if rounds is None else f'newest {rounds} bench rounds'}): "
+              f"{mined['executor_calls']} executor calls, {mined['executor_in'] // calls} input tokens per call")
+        for cl in mined["clusters"][:15]:
+            print(f"  {cl['turns_lost']:5} turns {cl['seconds_lost']:6} s {cl['tokens']:>8} tok  x{cl['count']:<3} {cl['signature'][:64]}"
+                  f"  · {', '.join(cl['tasks'][:3])} · last {cl['last_seen']}")
+        if args.action == "mine":
+            return 0
+        from .tune.propose import propose
+
+        try:
+            prof = Profile.load(args.profile)
+        except Exception:
+            prof = preset_profile(args.profile)
+        print(f"\nAsking {args.proposer or prof.planner or prof.executor} for profile changes (one model call)…")
+        if args.dry_run:
+            return 0
+        cands, rep, rpath = propose(prof, mined, Path("evals/tune"), args.proposer)
+        for cand in cands:
+            k, (a, b) = next(iter(prof.diff(cand).items()))
+            path = cand.save(Path(args.out) / f"{cand.name}.json")
+            print(f"\n  candidate {path}: {k} {json.dumps(a)} -> {json.dumps(b)}\n    {cand.why[k][:400]}")
+        for note in rep["raw"].get("harness_notes") or []:
+            print(f"\n  harness note [{note['cluster'][:60]}]\n    evidence: {note['evidence'][:300]}\n    suggestion: {note['suggestion'][:400]}")
+        for d in rep["dropped"]:
+            print(f"  dropped: {d}")
+        print(f"\nReport {rpath}" + (f"  ·  test one: pilot tune accept {Path(args.out) / (cands[0].name + '.json')}" if cands else "  ·  no knob change proposed"))
+        return 0
+    if args.action == "accept":
+        from .tune.accept import RULE, accept
+
+        if not args.model:
+            sys.exit("accept needs a candidate profile, e.g. pilot tune accept profiles/sub-max-long-edge-123456.json")
+        print(f"Accepting only if: {RULE}")
+        if args.dry_run:
+            return 0
+        v = accept(args.model, args.base, Path("evals"), args.repeat, args.adopt)
+        print(f"\n{v['status'].upper()}: {v['why']}")
+        for name, row in (v.get("metrics") or {}).items():
+            print(f"  {name:40} pass {row['pass']} · red-team {row['gate']} · calls {row['calls']} · actions {row['actions']} · "
+                  f"{row['seconds']} s · ${row['cost']}")
+        if v.get("adopted"):
+            print(f"Adopted into {v['adopted']}")
+        return 0
+    if args.action == "audit":
+        from .tune.ablate import audit
+
+        for name, row in sorted(audit(Path("runs")).items()):
+            detail = ", ".join(f"{k} {v}" for k, v in row.items() if k != "verdict")
+            print(f"  {name:16} {detail}  →  {row['verdict']}")
+        return 0
+    if args.action == "ablate":
+        from .tune.ablate import AblationConfig, ablate
+
+        frames = fr.load(Path(args.dir))
+        try:
+            prof = Profile.load(args.profile)
+        except Exception:
+            prof = preset_profile(args.profile)
+        acfg = AblationConfig(frames=min(args.frames, 30), budget=args.budget, tolerance=args.tolerance, parallel=args.parallel)
+        print(f"Ablating {prof.name} ({prof.executor}): up to {acfg.budget} model calls, no screen needed.")
+        if args.dry_run:
+            return 0
+        cand, report = ablate(prof, frames, Path(args.dir), acfg, Path("evals/tune"))
+        d = prof.diff(cand)
+        if not d:
+            print(f"\nNo change proposed  ·  report {report}")
+            return 0
+        path = cand.save(Path(args.out) / f"{cand.name}.json")
+        print(f"\nCandidate {cand.name}: " + ", ".join(f"{k}: {json.dumps(a)} -> {json.dumps(b)}" for k, (a, b) in d.items()))
+        print(f"Saved {path}  ·  report {report}")
+        print(f"Confirm before adopting: pilot eval --presets {prof.name},{path}")
+        return 0
+    if not args.model:
+        sys.exit("calibrate needs a model, e.g. pilot tune calibrate claude-code:claude-opus-5-5")
     cfg = CalibrationConfig(tuple(args.efforts.split(",")), args.frames, args.layouts, args.parallel, args.tolerance,
                             tuple(int(x) for x in args.sizes.split(",") if x))
     native = get_provider(parse_spec(args.model)).native_computer

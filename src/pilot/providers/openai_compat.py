@@ -32,6 +32,7 @@ def _content(parts: list[Part]) -> list[dict[str, Any]]:
 
 
 class OpenAICompatProvider(Provider):
+    honours = frozenset({"keep_images"})  # prunes old screenshots client-side
     native_computer = False
 
     def __init__(self, spec: ModelSpec, keep_images: int = 3):

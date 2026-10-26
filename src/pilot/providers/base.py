@@ -49,9 +49,15 @@ class Session(ABC):
         """Answer every tool call of the previous turn, plus optional extra content."""
 
 
+# Knobs that only some providers implement. A provider lists the ones it honours; for the rest the
+# knob is inert, and tuning it would measure noise (keep_images: the CLI keeps its own context).
+PROVIDER_KNOBS = frozenset({"keep_images"})
+
+
 class Provider(ABC):
     spec: ModelSpec
     native_computer: bool = False
+    honours: frozenset[str] = frozenset()
 
     @abstractmethod
     def session(self, system: str, tools: list[ToolSpec]) -> Session: ...
