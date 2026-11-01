@@ -4,15 +4,22 @@ from ..config import ModelSpec
 from .base import PROVIDER_KNOBS, Provider, Session, cost_of
 
 
-def inert_knobs(spec: ModelSpec) -> set[str]:
-    """Provider-dependent knobs this spec's provider ignores."""
+def provider_class(spec: ModelSpec) -> type[Provider]:
+    """The class, for its static facts (native_computer, honours) without connecting or loading weights."""
     if spec.provider == "claude-code":
         from .claude_code import ClaudeCodeProvider as cls
     elif spec.provider == "anthropic":
         from .anthropic_provider import AnthropicProvider as cls
+    elif spec.provider == "mlx":
+        from .mlx_local import MLXProvider as cls
     else:
         from .openai_compat import OpenAICompatProvider as cls
-    return set(PROVIDER_KNOBS - cls.honours)
+    return cls
+
+
+def inert_knobs(spec: ModelSpec) -> set[str]:
+    """Provider-dependent knobs this spec's provider ignores."""
+    return set(PROVIDER_KNOBS - provider_class(spec).honours)
 
 
 def get_provider(spec: ModelSpec, keep_images: int = 3) -> Provider:
@@ -24,9 +31,13 @@ def get_provider(spec: ModelSpec, keep_images: int = 3) -> Provider:
         from .anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(spec)
+    if spec.provider == "mlx":
+        from .mlx_local import MLXProvider
+
+        return MLXProvider(spec, keep_images=keep_images)
     from .openai_compat import OpenAICompatProvider
 
     return OpenAICompatProvider(spec, keep_images=keep_images)
 
 
-__all__ = ["PROVIDER_KNOBS", "Provider", "Session", "cost_of", "get_provider", "inert_knobs"]
+__all__ = ["PROVIDER_KNOBS", "Provider", "Session", "cost_of", "get_provider", "inert_knobs", "provider_class"]

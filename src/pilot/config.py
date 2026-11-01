@@ -20,6 +20,7 @@ PROVIDER_DEFAULTS = {
     "groq": ("https://api.groq.com/openai/v1", ("GROQ_API_KEY",)),
     "ollama": ("http://localhost:11434/v1", ()),
     "lmstudio": ("http://localhost:1234/v1", ()),
+    "mlx": (None, ()),  # a local model on Apple silicon, in-process (`uv sync --extra mlx`)
 }
 
 
@@ -60,7 +61,7 @@ class ModelSpec:
 
 def parse_spec(text: str, effort: str | None = None, thinking: str = "auto") -> ModelSpec:
     """'anthropic:claude-haiku-5-5', 'gemini:gemini-3.8-flash', 'claude-opus-5-5',
-    'ollama:qwen3-vl', 'compat:my-model@http://localhost:8000/v1'."""
+    'ollama:qwen3-vl', 'mlx:mlx-community/Qwen3.8-27B-4bit', 'compat:my-model@http://localhost:8000/v1'."""
     text = text.strip()
     base_url = None
     if ":" in text and not text.startswith(("http://", "https://")):
@@ -166,6 +167,10 @@ def has_credentials(provider: str) -> bool:
     global _CC_LOGGED_IN
     if provider in {"ollama", "lmstudio", "compat"}:
         return True
+    if provider == "mlx":
+        import importlib.util
+
+        return importlib.util.find_spec("mlx_vlm") is not None
     if provider == "claude-code":
         if _CC_LOGGED_IN is None:
             from .providers.claude_code import auth_status

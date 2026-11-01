@@ -16,6 +16,10 @@ dependencies = [
     "pyobjc-framework-ApplicationServices>=11.0; sys_platform == 'darwin'",
 ]
 
+[project.optional-dependencies]
+# Local models on Apple silicon (`mlx:` provider). Weights download on first use.
+mlx = ["mlx-vlm>=0.7.10; sys_platform == 'darwin'"]
+
 [project.scripts]
 pilot = "pilot.cli:main"
 

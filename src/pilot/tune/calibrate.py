@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from ..config import parse_spec
 from ..profile import Profile
-from ..providers import get_provider
+from ..providers import provider_class
 from ..replay.runner import replay, summarise
 from . import probes
 
@@ -98,7 +98,7 @@ def choose_effort(sweep: dict[str, dict[str, Any]], tolerance: int) -> tuple[str
 def calibrate(model: str, base: Profile, frames: list[dict[str, Any]], root: Path, cfg: CalibrationConfig,
               out_dir: Path, name: str | None = None, log: Callable[[str], None] = print) -> tuple[Profile, Path]:
     spec = parse_spec(model)
-    native = get_provider(spec).native_computer
+    native = provider_class(spec).native_computer
     report: dict[str, Any] = {"model": model, "started": datetime.now().isoformat(timespec="seconds"), "config": vars(cfg)}
     scale_edge: int | None = None
     scale_why = ""

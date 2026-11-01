@@ -66,7 +66,7 @@ def frames(tmp_path):
 
 def run(tmp_path, monkeypatch, convention, uses_ids=True, budget=None):
     make = lambda spec: FakeModel(spec, convention, uses_ids, budget)  # noqa: E731
-    for mod in (probes, rr, cal):
+    for mod in (probes, rr):
         monkeypatch.setattr(mod, "get_provider", make)
     cfg = cal.CalibrationConfig(efforts=("low", "medium"), frames=2, layouts=len(probes.LAYOUTS), parallel=1, sizes=(1280, 1024))
     return cal.calibrate("gemini:fake-flash", Profile("sub"), frames(tmp_path), tmp_path, cfg, tmp_path / "out", log=lambda m: None)

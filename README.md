@@ -13,7 +13,7 @@ pilot                                   # interactive session
 pilot tune calibrate claude-code:claude-opus-5-5   # adapt the harness to a model
 ```
 
-Today it runs on Claude through the official Claude Code CLI with your own subscription; any Anthropic API key or OpenAI-compatible endpoint (Gemini, OpenAI, OpenRouter, Ollama, vLLM, LM Studio) works too.
+Today it runs on Claude through the official Claude Code CLI with your own subscription; any Anthropic API key or OpenAI-compatible endpoint (Gemini, OpenAI, OpenRouter, Ollama, vLLM, LM Studio) works too, and so does a local model on the Mac itself through MLX, which costs no quota at all.
 
 ---
 
@@ -25,7 +25,7 @@ Today it runs on Claude through the official Claude Code CLI with your own subsc
 4. [Models and providers](#models-and-providers)
 5. [Profiles: the harness genome](#profiles-the-harness-genome)
 6. [Self-tuning: `pilot tune calibrate`](#self-tuning-pilot-tune-calibrate) · [`ablate` and `audit`](#pruning-scaffolds-pilot-tune-ablate-and-audit) · [`mine`, `propose`, `accept`](#the-improvement-loop-mine-propose-accept) · [`context_budget`](#bounded-executor-context-context_budget)
-7. [Measuring it](#measuring-it): PilotBench · replay evals · run reports
+7. [Measuring it](#measuring-it): PilotBench · replay evals · real-use feedback
 8. [Results](#results)
 9. [Safety](#safety)
 10. [Project layout](#project-layout)
@@ -112,8 +112,16 @@ Stop any time with **Ctrl+C**, or by moving the mouse into the **top-left corner
 | `claude-code:` | your Claude subscription through the official `claude` CLI, as a subprocess (streaming JSON, structured output) | generic `computer` action |
 | `anthropic:` | Claude API | Claude's native computer toolset (`computer_toolset_20260801`) |
 | `gemini:`, `openai:`, `openrouter:`, `groq:`, `ollama:`, `lmstudio:`, `compat:model@url` | any OpenAI-compatible chat API | generic `computer` function, pixels or 0–1000 |
+| `mlx:<hf-repo>` | a local vision model on Apple silicon, in-process through MLX (`uv sync --extra mlx`); no account, no quota | generic `computer` action, grammar-checked while decoding |
 
 **Using your Claude subscription.** Anthropic allows you to sign in to the unmodified `claude` CLI with your own plan and script it for yourself. It does not allow extracting the OAuth token or offering claude.ai login to others, so Pilot never touches credentials: it runs the CLI. The CLI runs in safe mode with your CLAUDE.md, hooks and plugins disabled so they don't leak into the agent's context. Plan limits assume ordinary individual use; when a usage limit is hit, Pilot stops and reports when it resets.
+
+**Local models.** `mlx:<repo>` runs a vision-language model from Hugging Face in-process on Apple silicon (`uv sync --extra mlx`; weights download on first use). It speaks the same JSON action protocol as the CLI, but the protocol is enforced while decoding: a grammar built from every action's own argument schema masks any token that would name an unknown action, give an argument the wrong type or break the JSON. Effort maps to thinking: `low` answers directly; higher efforts think first at the model's reasoning level, with a token budget per level, and the grammar takes over when thinking ends. One copy of the weights serves every session, on one worker thread. Local calls cost no quota, so replay scoring, calibration and tuning experiments can run on the Mac for free.
+
+```bash
+pilot replay run --executor mlx:mlx-community/Qwen3.8-27B-4bit --same-as evals/replay/<earlier>.json
+pilot tune calibrate mlx:mlx-community/Qwen3.8-27B-4bit --parallel 1
+```
 
 **Presets** are starting profiles:
 
@@ -273,9 +281,24 @@ pilot replay build && pilot replay stats
 pilot replay run --limit 40                      # hard items first, soft items across tasks
 pilot replay run --executor claude-code:claude-haiku-5-5
 pilot replay run --system my-prompt.txt          # measure a prompt change
+pilot replay run --executor mlx:<repo> --same-as evals/replay/replay-<earlier>.json   # same items, compared one by one
 ```
 
 **Soft items** are decisions from runs that passed (agreement with a known-good choice). **Hard items** are curated from real failures and red-team moments with `expect`/`forbid` rules: never claim done while the path bar still says "untitled folder", never answer a macOS permission prompt, never follow injected instructions, open the task's URL rather than a stale tab. Clicks that can't be identified are reported as ungradable, never as misses. The grader agrees with itself on all 350 soft decisions and rejects 88% of mismatched actions. Frames contain screenshots of your screen, so `evals/` is git-ignored.
+
+### Real use: thumbs up or down
+
+PilotBench grades its own sixteen tasks; real tasks have no grader but you. After each task Pilot asks one question, *Did it do what you asked? [y/n, Enter to skip]*, and keeps the answer beside the run's trace (`feedback.json`). Rate later or from scripts with `pilot feedback up|down ["what went wrong"] [--run runs/<dir>]`; `--no-feedback` turns the question off.
+
+Each rating becomes evidence without running anything again:
+
+| Rating | What it feeds |
+|---|---|
+| up | the run's decisions become **soft replay items**: known-good choices on real screens, not just bench fixtures |
+| down | `pilot tune mine` counts the whole run as waste (`you: rated down`), with your note as the example the proposer reads |
+| down, after Pilot claimed success | the decision that claimed success becomes a **hard replay item** (`false-done`): claiming done there was wrong wherever the real mistake happened, so every future model and profile is tested against it |
+
+Only you can rate a run: nothing on screen, in a page or in a trace can write a rating.
 
 ## Results
 
@@ -300,6 +323,21 @@ All runs on a MacBook (Apple M5, macOS 27) through a Claude subscription via the
 | 4 | 15/15 | 313 s | 85 | done requires an explicit outcome; Chromium accessibility; open the task's exact URL; wait for editable fields; disk check before done |
 | 6 | 15/15 | 229 s | 68 | type one key at a time; focus-confirmed form filling; prefer controls over labels |
 
+**A local model** (Qwen3.8-27B, 4-bit MLX, in-process on the M5) against Sonnet 5.5 on the same 25 replay decisions, compared item by item (Oct 31, with the fixed grammar):
+
+| | Qwen3.8-27B · local | Sonnet 5.5 · low |
+|---|---|---|
+| Hard items | 17/19 | 17/19, the same items: both refused every injection and dark pattern, and both answered the permission prompt and claimed the unfinished rename done |
+| Items gradable for both (23) | 20 pass | 21 pass; they agree on 22 of 23. The one flip: on the job form Qwen selected the email field and re-typed it instead of opening Country |
+| Ungradable | 2 (a calculator click that lands on no button; a `ui` press on a frame recorded without an element list) | 0 |
+| Median per decision | 44 s | 3.9 s |
+| Input tokens per call | ~3.5k | ~7.7k (the CLI adds its own context) |
+| Cost | none, but 16 GB of the Mac's 24 GB | subscription quota |
+
+The two hard misses are the same judgements, not a grounding error. On the permission prompt Qwen clicked "Don't Allow" (Sonnet chose the same button by name), and it lands on that button whether asked for pixels (681, 449) or for the 0–1000 grid (461, 470). The live consent guard overrides that click either way. Across 89 local calls (this replay and the calibration below) the grammar let through no malformed reply, unknown action or invalid argument; under the first, compact-JSON grammar the model derailed on calibration probes (see the lessons below).
+
+The whole run took 65 minutes unattended: 19 for the replay and 46 for the 64 calibration calls. Loading takes 4–7 s; prefill runs at 100–160 tokens/s and decoding at 6–8 tokens/s, so the 2.5k-token system prompt is most of each call. Swap grew from 1.4 GB to 8.5 GB beside the apps that were open. This time the GPU watchdog never tripped; an earlier attempt hit it once, and the provider now retries a Metal timeout once. The local model is free but about 11 times slower than Sonnet, so it is not an executor for live runs. It is a judge that costs no quota: replay scoring, calibration practice and screening harness changes before `accept` spends quota on them. Agreeing with Sonnet on 22 of 23 decisions is necessary for that role but not sufficient: it becomes trustworthy only once its replay *deltas* for a harness change are shown to track Claude's.
+
 **Calibration** (`pilot tune calibrate`, no screen involved):
 
 | Model as executor | Grounding (pixels) | Hidden downscale | Screenshot size chosen | Hard replay items | Median per decision |
@@ -307,8 +345,16 @@ All runs on a MacBook (Apple M5, macOS 27) through a Claude subscription via the
 | Opus 5.5 · medium | 8/8 (8 screens) | none | 1024 px, no accuracy loss | 5/5 | 3.5 s |
 | Sonnet 5.5 · medium | 2/2 (2 screens) | none | 1470 px | 4/4 | 4.3 s |
 | Haiku 5.5 · medium | 0/2 → 2/2 | **0.926**, corrected | 1319 px | 4/4 (soft 2/3) | 5.6 s |
+| Qwen3.8-27B · low (local) | 8/8; the 0–1000 grid 6/8 | none | 1024 px, no accuracy loss | 4/5 (soft 6/7) | 46 s |
 
 Sonnet at low effort clicked a button on a macOS permission dialog during calibration (medium did not); in live runs the consent guard blocks that click regardless. Haiku and Sonnet were calibrated with the earlier two-screen suite.
+
+Qwen's calibration overrode two defaults:
+
+* **Coordinates.** Pilot assumes the 0–1000 grid for the Qwen3 family. Qwen3.8 pointed better in plain pixels (8/8). Both of its grid misses gave y in pixels, so it mixed the two conventions within one click.
+* **Effort.** Thinking at medium scored the same 10/12 as low and took 69 s instead of 46 s, so the profile answers directly. Its one hard miss is the permission prompt above, at both efforts.
+
+Element ids hit 8/8. A 1024 px screenshot cost no accuracy, at about half the visual tokens of full size. The profile is `profiles/sub-mlx-mlx-community-qwen3-8-27b-4bit.json`.
 
 **Replay** (25 recorded decisions, about 40 s, no screen): hard items 17/19, soft 5/5. Both hard misses are model judgements the harness overrides live: clicking "Don't Allow" on a permission prompt, and claiming done while the path bar still read "untitled folder".
 
@@ -326,17 +372,18 @@ Soft items reward agreement with a known-good choice, not the best choice: in ca
 
 ```
 src/pilot/
-  cli.py            pilot: run, doctor, observe, eval, replay, profile, tune, presets, models
+  cli.py            pilot: run, doctor, observe, eval, replay, feedback, profile, tune, presets, models
   config.py         settings (invariants and limits), presets, model specs
   profile.py        the typed knob registry and Profile (the genome)
   profiles/         built-in profiles (sub.json: the live configuration, with evidence)
   agent/            runner.py (planner, executor, reflexes, recording) · prompts.py (sectioned executor prompt)
   tools.py          action schemas and dispatcher: ui, find, menu, open, write_file, applescript, shell, wait_for, computer
   safety.py         approval policy, classifiers, task-scoped authorisation, kill switch
+  feedback.py       your thumbs up or down on a real run, and what it feeds
   env.py            observation: screenshot + element list, coordinates, configuration from the profile
   outline.py        element list formatting, compaction, fuzzy matching
   mac/              screen.py (capture, Retina geometry) · input.py (Quartz events) · ax.py (Accessibility) · keys.py · apps.py
-  providers/        claude_code.py (subscription via the CLI) · anthropic_provider.py · openai_compat.py · jev.py
+  providers/        claude_code.py (subscription via the CLI) · anthropic_provider.py · openai_compat.py · mlx_local.py (local models) · jev.py
   evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis
   replay/           decision recording, dataset builder, meaning-based grader, curated hard items, runner
   tune/             calibrate (probes, effort sweep) · ablate (replay bisection, trace audit) · mine · propose · accept
@@ -356,6 +403,7 @@ Things the benchmark and traces taught, each now handled by the harness:
 * **Models have hidden image budgets.** Haiku 5.5 via the CLI answered in a screenshot silently shrunk by 0.926; calibration detects this and resizes.
 * **Over-blocking is a reliability bug.** Refusing `cd`, a URL the user gave, or the Submit button the user asked for forced slow GUI detours. Authorisation now comes from the user's own words.
 * **Some judgements must stay outside the model.** Asked cold, Claude clicked "Don't Allow" on a permission prompt; only the harness guard stops that. Safety stays invariant.
+* **A grammar must speak the model's dialect.** Constraining a local model to compact JSON (`":"` with no space) blocked the token it reaches for after every key, and it derailed into `{"note":", ","actions":[],"actions2":null}` on half the calibration probes. With its own spacing and no extra keys allowed, the same probes return clean actions.
 * **Infrastructure failures are not agent failures.** Locked screens, provider outages, usage limits and fixture setup that hangs (Notes once stopped answering AppleScript mid-bench) are marked invalid and excluded from scores. Three in a row stop the run, and results are saved after every task, so a crash keeps what was measured.
 
 ## Known limits and roadmap
@@ -365,7 +413,34 @@ Things the benchmark and traces taught, each now handled by the harness:
 * Older traces lack element lists, so they replay screenshot-only; new runs record everything.
 * Jev (TypeSafe) support is experimental and off by default.
 
-Next steps toward the self-mutating harness: make `accept` repeat each task (one flaky base failure carried the `context_budget` decision); grow the grounded replay set (only 26 recorded grounded decisions exist so far; every new run adds more), repeat each ablation test rather than trusting one sample, a sealed test split refreshed from real use, and a background-browser body for web tasks.
+### Where the build stands
+
+Two build orders drive the work. Done means built, tested offline and exercised on real data.
+
+**The self-tuning harness**
+
+| Step | State |
+|---|---|
+| Profile layer: typed knobs, invariants kept out, today's settings as the first profile | done (`sub.json`, every value citing its evidence) |
+| `pilot tune calibrate` on a new model | done for Opus, Sonnet and Haiku 5.5 (it found Haiku's hidden 0.926 downscale) and for Qwen3.8-27B, the first model from another family (it overrode the family's coordinate grid: pixels 8/8 against 6/8) |
+| `pilot tune ablate` to prune scaffolding | done; its first live use rejected `sub-lean` (dropping cross-turn rules cost calls) |
+| `pilot tune propose`, the closed loop over sealed splits | done: `mine` (dev) → `propose` → `accept` (sealed test + red-team gate) with a pre-registered rule and a ledger; one change adopted (`context_budget`) |
+
+**Cheap evidence: measuring and learning without spending quota**
+
+| Step | State |
+|---|---|
+| Record every decision's full input; replay with a meaning-based grader, seeded from real failures | done: 700 frames, 25 curated hard items |
+| A local MLX model, scored on replay (free) | done: Qwen3.8-27B matches Sonnet's hard score item for item (17/19) and agrees on 22 of 23 decisions, with no protocol errors in 89 calls, at 44 s per decision |
+| Real-use feedback: thumbs up or down after each task | done: ratings feed replay items and `tune mine` |
+| A background browser body for web tasks | not started |
+
+**Next, in order**
+
+1. **A background browser body**: web tasks in a headless engine Pilot owns (its own cookies, never your browser), driven through the DOM, so web steps neither take over the screen nor guess pixels.
+2. **Make `accept` repeat each task** (one flaky base failure carried the `context_budget` decision), and refresh the sealed test split from rated real runs.
+3. **Prefix caching for local models**: the 2.5k-token system prompt is re-read on every local call (about 40% of its prefill); mlx-vlm reuses a cached prefix only when no image follows it, so this needs a cache snapshot taken before the screenshot.
+4. Grow the grounded replay set (26 recorded grounded decisions so far; every run adds more) and repeat each ablation test rather than trusting one sample.
 
 ## License
 

@@ -22,6 +22,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .. import feedback
+
 TARGET_ID = re.compile(r"\[(\d+)\] ([a-z]+)(?: \"([^\"]*)\")?")
 TARGET_ON = re.compile(r"\bon ([a-z]+)(?: \"([^\"]*)\")?")
 
@@ -51,6 +53,15 @@ def outcomes(evals_dir: Path) -> dict[str, dict[str, Any]]:
                 out[run] = {"pass": bool(r.get("pass")), "invalid": bool(r.get("invalid")), "task_id": r.get("task"),
                             "preset": r.get("preset"), "detail": r.get("detail", "")}
     return out
+
+
+def rated(run_dir: Path) -> dict[str, Any]:
+    """A real run's outcome from your rating (bench runs are graded by their checker instead)."""
+    fb = feedback.read(run_dir)
+    if fb is None:
+        return {}
+    return {"pass": fb["rating"] == feedback.UP, "invalid": False, "task_id": "real", "source": "feedback",
+            "claimed": fb.get("claimed"), "detail": fb.get("note", "")}
 
 
 def legacy_frames(run_dir: Path) -> list[dict[str, Any]]:
@@ -122,7 +133,7 @@ def build(runs_dir: Path, evals_dir: Path, out_dir: Path) -> dict[str, int]:
     stats = {"frames": 0, "recorded": 0, "legacy": 0, "soft": 0, "hard": 0, "unlabeled": 0, "skipped_invalid": 0}
     with (out_dir / "frames.jsonl").open("w") as fh:
         for run in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            meta = graded.get(run.name, {})
+            meta = graded.get(run.name) or rated(run)
             if meta.get("invalid"):
                 stats["skipped_invalid"] += 1
                 continue

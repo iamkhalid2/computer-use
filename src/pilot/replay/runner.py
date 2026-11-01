@@ -120,7 +120,8 @@ def run_one(frame: dict[str, Any], spec: ModelSpec, system: str, root: Path, var
     g = grade(frame, calls, cand_space=space)
     return {"id": frame["id"], "kind": frame["label"]["kind"], "tags": frame["label"].get("tags", []),
             "task": (frame.get("outcome") or {}).get("task_id"), "pass": g["pass"], "why": g["why"], "calls": calls,
-            "text": turn.text[:300], "latency": round(time.monotonic() - t0, 2), "actions": len(calls),
+            # the provider's own timing when it has one: a local model's requests queue for one GPU, and the wait isn't the model's
+            "text": turn.text[:300], "latency": round(turn.latency or time.monotonic() - t0, 2), "actions": len(calls),
             "tokens_in": turn.usage.input_tokens + turn.usage.cache_read + turn.usage.cache_write, "tokens_out": turn.usage.output_tokens}
 
 
@@ -160,6 +161,23 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_tokens_in": round(statistics.mean(r["tokens_in"] for r in done)) if done else None,
         "failures": [{"id": r["id"], "kind": r["kind"], "why": r["why"]} for r in graded if not r["pass"]],
     }
+
+
+def paired(new: list[dict[str, Any]], old: list[dict[str, Any]]) -> dict[str, Any]:
+    """Item-by-item comparison on the same decisions: the items that flipped carry the evidence, not two totals."""
+    before = {r["id"]: r for r in old if "error" not in r and r.get("pass") is not None}
+    both = [(r, before[r["id"]]) for r in new if "error" not in r and r.get("pass") is not None and r["id"] in before]
+    gained = [n["id"] for n, o in both if n["pass"] and not o["pass"]]
+    lost = [n["id"] for n, o in both if o["pass"] and not n["pass"]]
+
+    def med(rows: list[dict[str, Any]], key: str) -> float | None:
+        vals = [r[key] for r in rows if r.get(key) is not None]
+        return statistics.median(vals) if vals else None
+
+    return {"items": len(both), "agree": len(both) - len(gained) - len(lost), "gained": gained, "lost": lost,
+            "pass": [sum(n["pass"] for n, _ in both), sum(o["pass"] for _, o in both)],
+            "median_latency": [med([n for n, _ in both], "latency"), med([o for _, o in both], "latency")],
+            "median_tokens_in": [med([n for n, _ in both], "tokens_in"), med([o for _, o in both], "tokens_in")]}
 
 
 def save(results: list[dict[str, Any]], out_dir: Path, meta: dict[str, Any]) -> Path:

@@ -6,6 +6,7 @@
     pilot observe               what the agent sees right now (no model calls)
     pilot eval                  graded task suite; compare presets
     pilot replay build|stats|run  re-ask recorded decisions; grade by meaning (no screen needed)
+    pilot feedback up|down ["what went wrong"]  rate the last run (or --run <dir>)
     pilot presets | models <provider>
 """
 
@@ -19,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune"}
+SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune", "feedback"}
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -65,8 +66,10 @@ def cmd_task(argv: list[str]) -> int:
     p.add_argument("task", nargs="*", help="what to do (omit for an interactive session)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--no-feedback", action="store_true", help="don't ask for a thumbs up or down after each task")
     _common(p)
     args = p.parse_args(argv)
+    from . import feedback
     from .agent.runner import Agent
     from .console import Reporter
     from .env import MacEnv
@@ -79,9 +82,14 @@ def cmd_task(argv: list[str]) -> int:
     agent = Agent(settings, env, reporter, Jev())
     from .mac.apps import KeepAwake
 
+    def rate(out) -> None:
+        if not (args.no_feedback or args.quiet) and sys.stdin.isatty() and out.report:
+            feedback.ask(Path(out.report).parent, out.success, reporter.c.input)
+
     if args.task:
         with KeepAwake():
             out = agent.run(" ".join(args.task))
+        rate(out)
         return 0 if out.success else 1
     reporter.c.print("[bold]Pilot[/] interactive · type a task, or 'exit'")
     history: list[str] = []
@@ -95,7 +103,26 @@ def cmd_task(argv: list[str]) -> int:
         if not task:
             continue
         out = agent.run(task, context=" | ".join(history[-4:]))
+        rate(out)
         history.append(f"{task} → {'done' if out.success else 'not done'}{': ' + out.answer[:120] if out.answer else ''}")
+
+
+def cmd_feedback(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="pilot feedback", description="Rate a finished run: it becomes replay and tuning evidence")
+    p.add_argument("rating", choices=["up", "down", "y", "n"])
+    p.add_argument("note", nargs="*", help="what went wrong (optional)")
+    p.add_argument("--run", default=None, help="run directory (default: the newest under runs/)")
+    args = p.parse_args(argv)
+    from . import feedback
+
+    run = Path(args.run) if args.run else feedback.latest_run(Path("runs"))
+    if run is None or not (run / "events.jsonl").exists():
+        sys.exit("no run to rate: give --run runs/<dir>")
+    fb = feedback.record(run, feedback.ANSWERS[args.rating], " ".join(args.note), source="cli")
+    kind = "a false done: the decision that claimed success becomes a hard replay item" if feedback.false_done(fb) else (
+        "its decisions become soft replay items" if fb["rating"] == feedback.UP else "tune mine counts it as a failure")
+    print(f"rated {run.name} {fb['rating']}: {kind} (after `pilot replay build`)")
+    return 0
 
 
 def _permission_hint(env, reporter) -> None:
@@ -147,6 +174,9 @@ def cmd_doctor(argv: list[str]) -> int:
     c.print("[bold]Credentials[/]")
     for prov in PROVIDER_DEFAULTS:
         if prov in {"ollama", "lmstudio"}:
+            continue
+        if prov == "mlx":
+            c.print(f"  {ok(has_credentials(prov))} mlx [dim](local models: uv sync --extra mlx)[/]")
             continue
         c.print(f"  {ok(has_credentials(prov))} {prov} [dim]({' / '.join(PROVIDER_DEFAULTS[prov][1])})[/]")
     c.print(f"  {ok(bool(os.environ.get('TYPESAFE_API_KEY')))} jev [dim](TYPESAFE_API_KEY, optional)[/]")
@@ -214,6 +244,7 @@ def cmd_replay(argv: list[str]) -> int:
     p.add_argument("--executor", default=None, help="provider:model to test (default: the preset's executor)")
     p.add_argument("--preset", default=None)
     p.add_argument("--system", default=None, help="file with an alternative executor system prompt")
+    p.add_argument("--same-as", default=None, help="an earlier replay result: re-ask exactly its items and compare item by item")
     args = p.parse_args(argv)
     from collections import Counter
 
@@ -242,10 +273,15 @@ def cmd_replay(argv: list[str]) -> int:
         c.print(f"frames {len(frames)} · {dict(kinds)}\nhard tags {dict(tags)}\ntasks {dict(tasks)}")
         return 0
     from .config import build_settings, parse_spec
-    from .replay.runner import replay, save, select, summarise
+    from .replay.runner import paired, replay, save, select, summarise
 
     spec = parse_spec(args.executor, thinking="off") if args.executor else build_settings(preset=args.preset).executor
-    chosen = select(frames, args.kind.split(","), args.tags.split(",") if args.tags else None, args.limit, args.seed)
+    earlier = json.loads(Path(args.same_as).read_text()) if args.same_as else None
+    if earlier:
+        by_id = {f["id"]: f for f in frames}
+        chosen = [by_id[r["id"]] for r in earlier["results"] if r["id"] in by_id]
+    else:
+        chosen = select(frames, args.kind.split(","), args.tags.split(",") if args.tags else None, args.limit, args.seed)
     system = Path(args.system).read_text() if args.system else None
     c.print(f"Replaying {len(chosen)} decisions on [cyan]{spec.label}[/] (one model call each, no screen needed)")
 
@@ -258,10 +294,22 @@ def cmd_replay(argv: list[str]) -> int:
                     f"{r['latency']:.1f}s [dim]{r['why'][:80]}[/]")
 
     results = replay(chosen, spec, root, system=system, parallel=args.parallel, on_result=show)
-    path = save(results, root, {"executor": spec.label, "system": args.system, "kind": args.kind, "limit": args.limit, "seed": args.seed})
+    meta = {"executor": spec.label, "system": args.system, "kind": args.kind, "limit": args.limit, "seed": args.seed, "same_as": args.same_as}
+    path = save(results, root, meta)
     s = summarise(results)
     c.print(f"[bold]hard {s['hard']}[/] {s['hard_by_tag']} · [bold]soft agreement {s['soft_agreement']}[/] · "
             f"median {s['median_latency']}s · ~{s['mean_tokens_in']} input tokens/call · ungradable {s['ungradable']} · errors {s['errors']}")
+    if earlier:
+        pr = paired(results, earlier["results"])
+        other = earlier["meta"].get("executor", "earlier")
+        c.print(f"[bold]vs {other}[/] on the same {pr['items']} items: pass {pr['pass'][0]} vs {pr['pass'][1]} · "
+                f"agree {pr['agree']} · only here {len(pr['gained'])} · only there {len(pr['lost'])} · "
+                f"median latency {pr['median_latency'][0]} vs {pr['median_latency'][1]} s · "
+                f"tokens {pr['median_tokens_in'][0]} vs {pr['median_tokens_in'][1]}")
+        for i in pr["lost"]:
+            c.print(f"  [red]lost[/] {i[-50:]}")
+        for i in pr["gained"]:
+            c.print(f"  [green]gained[/] {i[-50:]}")
     c.print(f"[dim]Results: {path}[/]")
     return 0
 
@@ -327,7 +375,7 @@ def cmd_tune(argv: list[str]) -> int:
     args = p.parse_args(argv)
     from .config import parse_spec, preset_profile
     from .profile import Profile
-    from .providers import get_provider
+    from .providers import provider_class
     from .replay import frames as fr
     from .tune.calibrate import CalibrationConfig, calibrate
 
@@ -414,7 +462,7 @@ def cmd_tune(argv: list[str]) -> int:
         sys.exit("calibrate needs a model, e.g. pilot tune calibrate claude-code:claude-opus-5-5")
     cfg = CalibrationConfig(tuple(args.efforts.split(",")), args.frames, args.layouts, args.parallel, args.tolerance,
                             tuple(int(x) for x in args.sizes.split(",") if x))
-    native = get_provider(parse_spec(args.model)).native_computer
+    native = provider_class(parse_spec(args.model)).native_computer
     frames = fr.load(Path(args.dir))
     if not frames:
         sys.exit("no replay frames: run `pilot replay build` first")
@@ -469,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in SUBCOMMANDS:
         name = argv.pop(0)
         return {"doctor": cmd_doctor, "observe": cmd_observe, "eval": cmd_eval, "presets": cmd_presets, "models": cmd_models,
-                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune}[name](argv)
+                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune, "feedback": cmd_feedback}[name](argv)
     return cmd_task(argv)
 
 

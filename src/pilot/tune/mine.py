@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import feedback
+
 LOOK = {"screenshot", "zoom", "wait"}
 SALT = "pilot-split-v1"  # changing it re-deals the split: only do that with a new task suite
 
@@ -215,6 +217,11 @@ def mine(runs_dir: Path, evals_dir: Path, tasks: list[Any], scope: str = "dev", 
             continue
         before = {k: c.count for k, c in clusters.items()}
         got = mine_run(events, run, task, clusters)
+        fb = feedback.read(f.parent)
+        if fb and fb["rating"] == feedback.DOWN:  # the whole run was wasted, whatever its clusters say
+            sig = "you: claimed done, wasn't" if feedback.false_done(fb) else "you: rated down"
+            clusters.setdefault(sig, Cluster(sig)).add(run, task, got["executor_calls"], float(events[-1].get("t") or 0) if events else 0.0,
+                                                       got["executor_in"], {"note": fb.get("note", "")})
         for k, c in clusters.items():
             if c.count != before.get(k, 0):
                 last_seen[k] = run[:15]

@@ -26,27 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config import ModelSpec
-from ..types import AssistantTurn, ImagePart, Part, TextPart, ToolCall, ToolResult, ToolSpec, Usage
-from .base import Provider, Session, parse_json_text
+from ..types import AssistantTurn, ImagePart, Part, ToolSpec, Usage
+from .base import ActionSession, Provider, action_schema, parse_json_text, tools_text
 
 ALIASES = {
     "claude-opus-5-5": "opus", "claude-sonnet-5-5": "sonnet", "claude-haiku-5-5": "haiku", "claude-fable-5-1": "fable",
-}
-
-ACTION_SCHEMA_TEMPLATE = {
-    "type": "object",
-    "properties": {
-        "note": {"type": "string", "description": "a short phrase about what you are doing, or your final reply"},
-        "actions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"tool": {"type": "string"}, "args": {"type": "object"}},
-                "required": ["tool", "args"],
-            },
-        },
-    },
-    "required": ["note", "actions"],
 }
 
 PROTOCOL = """
@@ -108,10 +92,6 @@ def _content(parts: list[Part]) -> list[dict[str, Any]]:
     return out
 
 
-def tools_text(tools: list[ToolSpec]) -> str:
-    return "\n".join(f"- {t.name}: {t.description}\n  schema: {json.dumps(t.schema, separators=(',', ':'))}" for t in tools)
-
-
 class CLIError(RuntimeError):
     pass
 
@@ -144,9 +124,7 @@ class ClaudeCodeProvider(Provider):
         return args
 
     def session(self, system: str, tools: list[ToolSpec]) -> "ClaudeCodeSession":
-        schema = json.loads(json.dumps(ACTION_SCHEMA_TEMPLATE))
-        schema["properties"]["actions"]["items"]["properties"]["tool"]["enum"] = [t.name for t in tools]
-        return ClaudeCodeSession(self, system + PROTOCOL.format(tools=tools_text(tools)), schema)
+        return ClaudeCodeSession(self, system + PROTOCOL.format(tools=tools_text(tools)), action_schema(tools))
 
     def complete_json(self, system: str, parts: list[Part], schema: dict[str, Any]) -> tuple[dict[str, Any], AssistantTurn]:
         args = self.base_args(system, schema) + ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
@@ -187,7 +165,7 @@ def result_to_turn(result: dict[str, Any], latency: float, model: str) -> Assist
     return AssistantTurn(usage=usage, latency=latency, model=f"subscription:{model}")
 
 
-class ClaudeCodeSession(Session):
+class ClaudeCodeSession(ActionSession):
     """One persistent CLI process per executor session."""
 
     def __init__(self, provider: ClaudeCodeProvider, system: str, schema: dict[str, Any]):
@@ -289,45 +267,3 @@ class ClaudeCodeSession(Session):
                         self.rescued += len(native)
                         data = {"note": "", "actions": native}
                 return self._to_turn(data, turn)
-
-    def _to_turn(self, data: dict[str, Any], turn: AssistantTurn) -> AssistantTurn:
-        note = str(data.get("note") or "").strip()
-        for a in data.get("actions") or []:
-            if not isinstance(a, dict) or not a.get("tool"):
-                continue
-            self.n += 1
-            args = a.get("args") if isinstance(a.get("args"), dict) else {"__invalid__": json.dumps(a.get("args"))}
-            turn.calls.append(ToolCall(f"cc{self.n}", str(a["tool"]), args))
-        if turn.calls:
-            turn.stop = "tool_use"
-            if note:
-                turn.notes.append(note)
-        else:
-            turn.stop = "end"
-            turn.text = note
-        if self.on_note:
-            for n in turn.notes:
-                self.on_note(n)
-        return turn
-
-    def send(self, parts: list[Part]) -> AssistantTurn:
-        return self._turn(parts)
-
-    def reply(self, calls: list[ToolCall], results: list[ToolResult], extra: list[Part] | None = None) -> AssistantTurn:
-        by_id = {r.call_id: r for r in results}
-        lines = ["Results:"]
-        images: list[Part] = []
-        observations: list[str] = []
-        for i, c in enumerate(calls, 1):
-            r = by_id.get(c.id) or ToolResult(c.id, False, "Not executed.")
-            lines.append(f"{i}. {c.name} {json.dumps(c.args, ensure_ascii=False)[:200]} → {'ok' if r.ok else 'ERROR'}: {r.text}")
-            if r.image is not None:
-                images = [r.image]
-            if r.observation:
-                observations = [r.observation]
-        parts: list[Part] = [TextPart("\n".join(lines))]
-        parts += images
-        parts += [TextPart(o) for o in observations]
-        parts += list(extra or [])
-        return self._turn(parts)
-

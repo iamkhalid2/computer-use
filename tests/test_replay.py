@@ -147,3 +147,13 @@ def test_unidentifiable_clicks_are_ungradable_not_wrong():
     assert g["pass"] is None and "ungradable" in g["why"]
     s = rr.summarise([{"id": "a", "kind": "soft", "tags": [], "pass": None, "why": "ungradable", "latency": 1, "tokens_in": 1}])
     assert s["ungradable"] == 1 and s["soft_agreement"] == "0/0"
+
+
+def test_paired_counts_flips_on_shared_items():
+    old = [{"id": "a", "pass": True, "latency": 3, "tokens_in": 10}, {"id": "b", "pass": False, "latency": 4, "tokens_in": 10},
+           {"id": "c", "pass": True, "latency": 5, "tokens_in": 10}, {"id": "d", "pass": None}]
+    new = [{"id": "a", "pass": True, "latency": 30, "tokens_in": 20}, {"id": "b", "pass": True, "latency": 40, "tokens_in": 20},
+           {"id": "c", "pass": False, "latency": 50, "tokens_in": 20}, {"id": "d", "pass": True}, {"id": "e", "error": "x"}]
+    pr = rr.paired(new, old)
+    assert pr["items"] == 3 and pr["agree"] == 1 and pr["gained"] == ["b"] and pr["lost"] == ["c"]
+    assert pr["pass"] == [2, 2] and pr["median_latency"] == [40, 4]
