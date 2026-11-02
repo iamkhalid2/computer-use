@@ -94,11 +94,15 @@ def validate(task_ids: list[str] | None, tags: list[str] | None, with_apps: bool
 
 
 def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overrides: dict, out_dir: Path,
-              tags: list[str] | None = None, suite: str = "bench") -> Path:
+              tags: list[str] | None = None, suite: str = "bench", retry: bool = False) -> Path:
+    """Run every task for every preset. With lessons on, bench runs learn from the grader's verdict;
+    held-out runs only read lessons. With `retry`, a failed run reflects on its own trace (in a throwaway
+    copy of the lessons) and tries the same task once more: the second-attempt test."""
     from ..agent.runner import Agent
     from ..config import build_settings
     from ..console import Reporter
     from ..env import MacEnv
+    from ..experience import GRADED, Experience
     from ..providers.jev import Jev
 
     from .holdout import grade, source_hash
@@ -119,6 +123,67 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     def save(rows: list[dict[str, Any]]) -> None:  # after every run, so a crash keeps what was measured
         path.write_text(json.dumps(rows, indent=2))
 
+    def attempt(preset: str, task: EvalTask, n: int, settings: Any, memory: Experience | None, context: str = "",
+                tries: int = 1) -> tuple[dict[str, Any], Any]:
+        nonlocal streak
+        server.reset()
+        ctx = Ctx(server)
+        if screen_locked():
+            c.print("[red]The Mac is locked. Stopping: runs on a locked screen measure nothing.[/]")
+            raise _Stop()
+        base = {**stamp, "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "attempt": tries,
+                "lessons": memory.mode if memory else "off"}
+        try:
+            task.setup(ctx)
+        except Exception as e:  # a hung app or fixture is the bench's failure, not the agent's
+            row = {**base, "invalid": True, "pass": False, "detail": f"setup failed: {type(e).__name__}: {str(e)[:160]}", "claimed": None,
+                   "seconds": 0, "model_calls": 0, "model_seconds": 0, "actions": 0, "escalations": 0, "cost": None, "report": None}
+            rows.append(row)
+            c.print(f"[yellow]INVALID[/] setup failed: {type(e).__name__}: {str(e)[:120]}")
+            save(rows)
+            return row, None
+        time.sleep(0.4)
+        body_dir = temp_dir()  # a fresh background-browser profile per run: no cookies carried between runs
+        os.environ["PILOT_BODY_DIR"] = body_dir
+        agent = Agent(settings, env, Reporter(), Jev(), memory=memory, defer_learning=True)
+        try:
+            out = agent.run(task.render(ctx), context)
+        finally:
+            shutil.rmtree(body_dir, ignore_errors=True)
+        ctx.answer = " ".join(x for x in (out.answer, out.summary, out.reason) if x)
+        ctx.claimed = out.success
+        try:
+            ok, detail, breach = grade(task, ctx)
+        except Exception as e:
+            ok, detail, breach = False, f"grader error: {e}", None
+        try:
+            task.cleanup(ctx)
+        except Exception:
+            pass
+        invalid = bool(INFRA_FAILURE.match(out.reason or ""))
+        row = {
+            **base, "kind": getattr(task, "kind", None), "breach": breach, "invalid": invalid, "pass": ok, "detail": detail,
+            "claimed": out.success, "seconds": round(out.seconds, 1), "model_calls": out.stats.model_calls,
+            "model_seconds": round(out.stats.model_seconds, 1), "actions": out.stats.actions,
+            "escalations": out.stats.escalations, "cost": round(out.stats.cost, 4) if out.stats.cost_known else None,
+            "tokens_in": int(sum(r.get("in", 0) for r in out.stats.by_role.values())),
+            "report": out.report,
+        }
+        rows.append(row)
+        save(rows)
+        streak = streak + 1 if invalid else 0
+        if streak >= 3:
+            c.print("[red]Three infrastructure failures in a row (network or provider down). Stopping.[/]")
+            raise _Stop()
+        label = "INVALID" if invalid else ("PASS" if ok else "FAIL")
+        if out.reason.startswith("Claude plan usage limit"):
+            c.print(f"[red]{out.reason}. Stopping: every further run would fail the same way.[/]")
+            raise _Stop()
+        c.print(f"[{'yellow' if invalid else 'green' if ok else 'red'}]{label}[/] {detail}" + (f" ({out.reason[:80]})" if invalid else ""))
+        if memory is not None and memory.mode == "learn" and not invalid:
+            agent.learn(Path(out.report).parent, ok, GRADED, feedback=detail)  # the grader's verdict is the evidence
+        return row, agent
+
     try:
         # Task by task, alternating which profile goes first: profiles compared back to back see the
         # same model latency, and neither always gets the warm app the other one just opened.
@@ -132,74 +197,64 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
 
                     # Each entry is a preset name or a saved profile (name or path).
                     settings = build_settings(**({"preset": preset} if preset in PRESETS else {"profile": preset}), **kw)
+                    memory = eval_memory(settings.profile.lessons, suite)
                     c.rule(f"{preset} · {task.id} · run {n + 1}/{repeat}")
-                    server.reset()
-                    ctx = Ctx(server)
-                    if screen_locked():
-                        c.print("[red]The Mac is locked. Stopping: runs on a locked screen measure nothing.[/]")
-                        raise _Stop()
-                    try:
-                        task.setup(ctx)
-                    except Exception as e:  # a hung app or fixture is the bench's failure, not the agent's
-                        rows.append({**stamp, "invalid": True, "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": False,
-                                     "detail": f"setup failed: {type(e).__name__}: {str(e)[:160]}", "claimed": None, "seconds": 0,
-                                     "model_calls": 0, "model_seconds": 0, "actions": 0, "escalations": 0, "cost": None, "report": None})
-                        c.print(f"[yellow]INVALID[/] setup failed: {type(e).__name__}: {str(e)[:120]}")
-                        save(rows)
-                        continue
-                    time.sleep(0.4)
-                    body_dir = temp_dir()  # a fresh background-browser profile per run: no cookies carried between runs
-                    os.environ["PILOT_BODY_DIR"] = body_dir
-                    try:
-                        out = Agent(settings, env, Reporter(), Jev()).run(task.render(ctx))
-                    finally:
-                        shutil.rmtree(body_dir, ignore_errors=True)
-                    ctx.answer = " ".join(x for x in (out.answer, out.summary, out.reason) if x)
-                    ctx.claimed = out.success
-                    try:
-                        ok, detail, breach = grade(task, ctx)
-                    except Exception as e:
-                        ok, detail, breach = False, f"grader error: {e}", None
-                    try:
-                        task.cleanup(ctx)
-                    except Exception:
-                        pass
-                    invalid = bool(INFRA_FAILURE.match(out.reason or ""))
-                    rows.append({
-                        **stamp, "kind": getattr(task, "kind", None), "breach": breach,
-                        "invalid": invalid,
-                        "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": ok, "detail": detail,
-                        "claimed": out.success, "seconds": round(out.seconds, 1), "model_calls": out.stats.model_calls,
-                        "model_seconds": round(out.stats.model_seconds, 1), "actions": out.stats.actions,
-                        "escalations": out.stats.escalations, "cost": round(out.stats.cost, 4) if out.stats.cost_known else None,
-                        "tokens_in": int(sum(r.get("in", 0) for r in out.stats.by_role.values())),
-                        "report": out.report,
-                    })
-                    save(rows)
-                    streak = streak + 1 if invalid else 0
-                    if streak >= 3:
-                        c.print("[red]Three infrastructure failures in a row (network or provider down). Stopping.[/]")
-                        raise _Stop()
-                    label = "INVALID" if invalid else ("PASS" if ok else "FAIL")
-                    if out.reason.startswith("Claude plan usage limit"):
-                        c.print(f"[red]{out.reason}. Stopping: every further run would fail the same way.[/]")
-                        raise _Stop()
-                    c.print(f"[{'yellow' if invalid else 'green' if ok else 'red'}]{label}[/] {detail}" + (f" ({out.reason[:80]})" if invalid else ""))
+                    row, agent = attempt(preset, task, n, settings, memory)
+                    if retry and agent is not None and not row["pass"] and not row["invalid"]:
+                        # Reflexion: learn from this failure in a throwaway copy, then try once more. Only the
+                        # binary verdict is shown, never the grader's detail.
+                        scratch = (memory or Experience(mode="use")).scratch()
+                        try:
+                            failed = Path(row["report"]).parent
+                            scratch.learn(agent.planner or agent.executor, failed, False, GRADED)
+                            scratch.mode, scratch.focus = "use", failed.name
+                            c.rule(f"{preset} · {task.id} · run {n + 1} · second attempt")
+                            attempt(preset, task, n, settings, scratch, RETRY_NOTE, tries=2)
+                        except _Stop:
+                            raise
+                        except Exception as e:
+                            c.print(f"[yellow]retry skipped: {type(e).__name__}: {str(e)[:120]}[/]")
+                        finally:
+                            shutil.rmtree(scratch.root, ignore_errors=True)
     except _Stop:
         pass
     finally:
         server.stop()
         awake.__exit__()
     save(rows)
-    report(rows, presets, tasks, c)
+    first = [r for r in rows if r.get("attempt", 1) == 1]  # second attempts are their own experiment
+    report(first, presets, tasks, c)
     if suite == "holdout":
-        report_holdout(rows, presets, c)
+        report_holdout(first, presets, c)
+    if retry:
+        s = retry_summary(rows)
+        c.print(f"Second attempts: {s['fixed']}/{s['failed']} failures fixed after reflecting on the first try")
     c.print(f"[dim]Results: {path}[/]")
     return path
 
 
+def retry_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Of the first attempts that failed, how many the second attempt fixed (matched by preset, task, run)."""
+    second = {(r["preset"], r["task"], r["run"]): r for r in rows if r.get("attempt") == 2 and not r.get("invalid")}
+    failed = [r for r in rows if r.get("attempt", 1) == 1 and not r["pass"] and not r.get("invalid")
+              and (r["preset"], r["task"], r["run"]) in second]
+    fixed = [r for r in failed if second[(r["preset"], r["task"], r["run"])]["pass"]]
+    return {"failed": len(failed), "fixed": len(fixed), "tasks": sorted({r["task"] for r in fixed})}
+
+
+def eval_memory(mode: str, suite: str):
+    """The lessons an eval run sees. The sealed suite never writes or credits one: held-out runs only read."""
+    from ..experience import Experience
+
+    return None if mode == "off" else Experience(mode="use" if suite == "holdout" else mode)
+
+
 class _Stop(Exception):
     pass
+
+
+RETRY_NOTE = ("A previous attempt at this exact task failed an external check of the end state. "
+              "The lessons below include what was learned from it.")
 
 
 # Failures of the infrastructure, not the agent: provider outages, quota, a locked screen.

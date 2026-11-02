@@ -123,6 +123,8 @@ KNOBS: dict[str, Knob] = {k.name: k for k in [
     Knob("await_editable", "scaffold", "bool", True, "before typing, wait for an editable field to take focus"),
     Knob("editable_timeout", "scaffold", "float", 0.6, "seconds to wait for an editable field", lo=0.0, hi=3.0),
     Knob("paste_threshold", "scaffold", "int", 120, "text at least this long is pasted instead of typed", lo=20, hi=2000),
+    Knob("lessons", "scaffold", "choice", "off", "experience: off; use (show relevant learned lessons); learn (show them, then "
+         "reflect on the run, credit the lessons it followed and keep new ones)", choices=("off", "use", "learn")),
     # prompt: which optional executor rules are included (safety rules always are)
     Knob("executor_rules", "prompt", "subset", list(TUNABLE_RULES), "optional executor prompt rules", choices=tuple(TUNABLE_RULES)),
 ]}

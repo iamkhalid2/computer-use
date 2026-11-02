@@ -23,6 +23,7 @@ from typing import Any, Callable
 from ..config import Settings
 from ..console import Reporter
 from ..env import MacEnv
+from ..experience import SELF, Experience
 from ..mac import apps
 from ..providers import cost_of, get_provider
 from ..providers.jev import Jev
@@ -114,7 +115,8 @@ def _steps(data: dict[str, Any]) -> list[Step]:
 
 
 class Agent:
-    def __init__(self, settings: Settings, env: MacEnv, reporter: Reporter, jev: Jev | None = None):
+    def __init__(self, settings: Settings, env: MacEnv, reporter: Reporter, jev: Jev | None = None,
+                 memory: Experience | None = None, defer_learning: bool = False):
         self.s = settings
         self.env = env
         self.r = reporter
@@ -141,6 +143,12 @@ class Agent:
         self.turns = 0
         self.advice = ""
         self.planned = False
+        # Lessons from earlier attempts. An eval passes its own store (read-only on the sealed suite) and
+        # credits it with the grader's verdict itself; otherwise the run learns from its own verdict.
+        mode = settings.profile.lessons
+        self.memory = memory if memory is not None else (Experience(mode=mode) if mode != "off" else None)
+        self.defer_learning = defer_learning
+        self.lessons = ""
 
     # -- bookkeeping -------------------------------------------------------------------
     def _switched(self, message: str) -> None:
@@ -231,6 +239,8 @@ class Agent:
                     + "Do only this step, then call `done`. Escalate if the step is impossible or the plan is wrong.")
         if context:
             text = f"Earlier in this session: {context}\n\n{text}"
+        if self.lessons:
+            text += "\n\n" + self.lessons
         return text + "\n\nCurrent screen:"
 
     @staticmethod
@@ -419,6 +429,18 @@ class Agent:
             self._warm(turn, fresh_in)
             self.turns += 1
 
+    def learn(self, run_dir: Path, success: bool, weight: float, feedback: str = "") -> None:
+        """Reflect on a finished run: credit the lessons it followed, keep new ones. Never fails the task."""
+        assert self.memory is not None
+        t = time.monotonic()
+        try:
+            entry = self.memory.learn(self.planner or self.executor, run_dir, success, weight, feedback)
+        except Exception as e:
+            self.r.info(f"learning skipped ({type(e).__name__}: {str(e)[:120]})")
+            return
+        followed = sum(v == "followed" for v in entry["verdicts"].values())
+        self.r.info(f"learned in {time.monotonic() - t:.0f}s: {followed} lesson(s) followed and credited, {len(entry['added'])} new")
+
     def _reflex_reject(self, step: Step) -> str | None:
         """Jev checks the step's visible done-condition; only a confident 'no' blocks."""
         if self.jev is None or not step.done_when:
@@ -451,6 +473,11 @@ class Agent:
         self.planned = False
         # Authorisation comes from the user's own words for this task, never from the screen.
         self.policy.scope = TaskScope.from_task(task, s.write_roots)
+        self.lessons = ""
+        if self.memory is not None:
+            chosen = self.memory.select(task)
+            self.lessons = Experience.brief(chosen)
+            self.trace.log("lessons", ids=[x.id for x, _ in chosen], relevance=[round(r, 2) for _, r in chosen], mode=self.memory.mode)
         self.r.header(task, s)
         success, answer, summary, reason = False, "", "", ""
         steps: list[Step] = []
@@ -461,7 +488,8 @@ class Agent:
             if self.planner and s.profile.plan == "upfront":
                 self.planned = True
                 t = time.monotonic()
-                data = self._plan_call(prompts.PLANNER, f"Task: {task}\nGUI-only: {s.gui_only}\n" + (f"Earlier in this session: {context}\n" if context else "") + "Current screen:",
+                data = self._plan_call(prompts.PLANNER, f"Task: {task}\nGUI-only: {s.gui_only}\n" + (f"Earlier in this session: {context}\n" if context else "")
+                                       + (f"{self.lessons}\n" if self.lessons else "") + "Current screen:",
                                        prompts.PLAN_SCHEMA, "plan")
                 if data and data.get("impossible"):
                     raise RuntimeError(f"Not possible: {data.get('strategy') or 'the planner found no way to do this'}")
@@ -500,7 +528,7 @@ class Agent:
                     self.r.info(f"↑ escalate: {reason[:160]}")
                     t = time.monotonic()
                     lead = (f"Task: {task}\nGUI-only: {s.gui_only}\nProgress:\n{self._log_text(steps)}\n"
-                            f"The executor escalated on step {i + 1}: {reason}\nCurrent screen:")
+                            f"The executor escalated on step {i + 1}: {reason}\n" + (f"{self.lessons}\n" if self.lessons else "") + "Current screen:")
                     data = self._plan_call(prompts.REPLANNER, lead, prompts.REPLAN_SCHEMA, "replan")
                     if data and data.get("impossible"):
                         raise RuntimeError(f"Not possible: {data.get('advice') or reason}")
@@ -562,4 +590,6 @@ class Agent:
         self.r.final(success, answer, summary if success else reason, self.trace.stats, seconds, str(report))
         if s.speak:
             apps.say(answer or ("Done." if success else f"I couldn't finish: {reason}"))
+        if self.memory is not None and self.memory.mode == "learn" and not self.defer_learning:
+            self.learn(self.trace.dir, success, SELF)
         return Outcome(success, answer, summary, seconds, str(report), self.trace.stats, reason, steps)

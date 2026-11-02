@@ -7,6 +7,7 @@
     pilot eval                  graded task suite; compare presets
     pilot replay build|stats|run  re-ask recorded decisions; grade by meaning (no screen needed)
     pilot feedback up|down ["what went wrong"]  rate the last run (or --run <dir>)
+    pilot learn seed|show|report  lessons Pilot learned from its own runs, and whether they help
     pilot presets | models <provider>
 """
 
@@ -20,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune", "feedback"}
+SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune", "feedback", "learn"}
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -211,6 +212,7 @@ def cmd_eval(argv: list[str]) -> int:
     p.add_argument("--with-apps", action="store_true", help="include oracles that drive Notes via AppleScript")
     p.add_argument("--suite", default="bench", choices=["bench", "holdout"], help="holdout: the sealed suite nothing was tuned on")
     p.add_argument("--freeze", action="store_true", help="with --validate --suite holdout: record the suite's hash once every grader is valid")
+    p.add_argument("--retry", action="store_true", help="after a failed run, reflect on it and try the task once more (second-attempt test)")
     _common(p)
     args = p.parse_args(argv)
     from .config import default_preset
@@ -240,7 +242,7 @@ def cmd_eval(argv: list[str]) -> int:
     if args.planner or args.executor:
         overrides.update(planner=args.planner, executor=args.executor)
     out = Path(args.out) / "holdout" if args.suite == "holdout" else Path(args.out)
-    run_evals(presets, task_ids, args.repeat, overrides, out, tags, args.suite)
+    run_evals(presets, task_ids, args.repeat, overrides, out, tags, args.suite, retry=args.retry)
     return 0
 
 
@@ -494,6 +496,74 @@ def cmd_tune(argv: list[str]) -> int:
     return 0
 
 
+def cmd_learn(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="pilot learn", description="Experience: lessons Pilot learned from its own runs, with a belief in each")
+    p.add_argument("action", choices=["seed", "show", "report"])
+    p.add_argument("results", nargs="?", help="report: an eval results file (evals/holdout/holdout-*.json)")
+    p.add_argument("--on", default="sub-learn", help="report: the profile with lessons on")
+    p.add_argument("--off", default="sub", help="report: the profile with lessons off")
+    p.add_argument("--per-task", type=int, default=2, help="seed: recorded runs reflected on per bench task (a failure first)")
+    _common(p)
+    args = p.parse_args(argv)
+    from . import experience as X
+
+    exp = X.Experience(mode="learn")
+    if args.action == "show":
+        for les in sorted(exp.lessons.values(), key=lambda x: (-x.mean, -x.evidence)):
+            print(f"{les.id} {les.status:9} {les.mean:4.0%} a={les.alpha:<4g} b={les.beta:<4g} followed {les.followed}/{les.shown}  "
+                  f"[{', '.join(les.apps) or 'general'}] {les.text}")
+        print(f"{len(exp.lessons)} lessons in {exp.path}")
+        return 0
+    if args.action == "seed":
+        from .providers import get_provider
+        from .tune.mine import is_sealed, sealed_keys
+
+        settings = _settings(args)
+        prov = get_provider(settings.planner or settings.executor)
+        sealed = sealed_keys()
+        by_task: dict[str, list[tuple[Path, bool, str]]] = {}
+        for f in sorted(Path("evals").glob("pilotbench-*.json"), reverse=True):  # newest first
+            for r in json.loads(f.read_text()):
+                run = Path(r["report"]).parent if r.get("report") else None
+                if r.get("invalid") or run is None or not run.exists() or is_sealed(run, sealed):
+                    continue
+                by_task.setdefault(r["task"], []).append((run, bool(r["pass"]), "" if r["pass"] else str(r.get("detail", ""))))
+        picks = []
+        for runs in by_task.values():  # the latest failure, then the latest pass: what went wrong, and a route that worked
+            fail = [x for x in runs if not x[1]][:1]
+            ok = [x for x in runs if x[1]][:1]
+            picks += (fail + ok)[: args.per_task]
+        print(f"Reflecting on {len(picks)} recorded runs from {len(by_task)} bench tasks with {settings.planner.label if settings.planner else settings.executor.label}")
+        X.seed(prov, exp, picks)
+        print(f"Merged {exp.consolidate(prov)} groups of paraphrases: {len(exp.lessons)} lessons in {exp.path}")
+        return 0
+    if not args.results:
+        sys.exit("report needs an eval results file")
+    from .evals import holdout
+
+    rows = json.loads(Path(args.results).read_text())
+    sealed_runs = {Path(r["report"]).parent.name for f in Path("evals/holdout").glob("holdout-*.json")
+                   for r in json.loads(f.read_text()) if r.get("report")}
+    t = X.transfer(rows, args.on, args.off, (holdout.frozen() or {}).get("sha256"), exp, sealed_runs)
+    t["results"] = str(args.results)
+    out = Path("evals/learning")
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = Path(args.results).stem.split("-", 1)[-1]
+    (out / f"transfer-{stamp}.json").write_text(json.dumps(t, indent=1))
+    for a in ("off", "on"):
+        s = t[a]
+        print(f"{a:3} {s['preset']:12} {s['passes']}/{s['n']} ({s['pass_rate']:.0%}, 95% CI {s['ci95'][0]:.0%}-{s['ci95'][1]:.0%})  "
+              f"${s['cost']}  median {s['median_s']}s  {s['model_calls']} calls/task")
+    print(f"held out: {t['held_out']}  ->  {out / f'transfer-{stamp}.json'}")
+    if any(r.get("attempt") == 2 for r in rows):
+        from .evals.runner import retry_summary
+
+        r = {**retry_summary(rows), "held_out": t["held_out"], "results": str(args.results)}
+        (out / f"retry-{stamp}.json").write_text(json.dumps(r, indent=1))
+        print(f"second attempts fixed {r['fixed']}/{r['failed']} failures")
+    return 0
+
+
 def cmd_presets(argv: list[str]) -> int:
     from .config import PRESETS, default_preset, has_credentials
 
@@ -530,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in SUBCOMMANDS:
         name = argv.pop(0)
         return {"doctor": cmd_doctor, "observe": cmd_observe, "eval": cmd_eval, "presets": cmd_presets, "models": cmd_models,
-                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune, "feedback": cmd_feedback}[name](argv)
+                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune, "feedback": cmd_feedback, "learn": cmd_learn}[name](argv)
     return cmd_task(argv)
 
 
