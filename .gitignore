@@ -8,3 +8,5 @@ __pycache__/
 /evals/
 /pilot-observe.png
 .DS_Store
+/.northstar/
+/experience/
