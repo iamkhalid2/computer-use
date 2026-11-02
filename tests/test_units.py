@@ -201,3 +201,30 @@ def test_task_scope_comes_only_from_the_users_words():
     assert classify_shell("rm ~/PilotEval/a.pdf", sc).level == "confirm"  # deleting was never asked for
     assert classify_shell("sudo rm -rf /", sc).level == "block"
     assert classify_shell("mkdir ~/x").level == "confirm"  # no scope, no authority
+
+
+def test_wrappers_opened_code_and_bulk_buttons_need_the_users_say_so():
+    from pilot.safety import TaskScope, classify_label, classify_open, classify_shell
+
+    sc = TaskScope.from_task("Delete the draft 'Old memo' on http://127.0.0.1:9/drafts.html and save notes in ~/PilotEval")
+    # A wrapper is judged by the command it runs.
+    assert classify_shell("env touch ~/Library/x", sc).level == "confirm"
+    assert classify_shell("nice -n 5 ls ~/PilotEval", sc).level == "ok" and classify_shell("env", sc).level == "ok"
+    assert classify_shell("ls ~/PilotEval | xargs rm", sc).level == "confirm"
+    assert classify_shell("command -v python3", sc).level == "ok"
+    assert classify_shell("awk 'BEGIN{system(\"id\")}'", sc).level == "confirm"
+    assert classify_shell("textutil -convert txt -stdout ~/PilotEval/a.rtf", sc).level == "ok"
+    assert classify_shell("textutil -convert txt ~/PilotEval/a.rtf", sc).level == "confirm"
+    # Opening shows pages and documents; it runs apps, scripts and deep links only with approval.
+    assert classify_open("http://127.0.0.1:9/drafts.html", sc).level == "ok" and classify_open("~/PilotEval/a.pdf").level == "ok"
+    assert classify_open("/System/Applications/Calculator.app").level == "ok" and classify_open("Calculator").level == "ok"
+    assert classify_open("~/PilotEval/tools/fix.command").level == "confirm"
+    assert classify_open("~/Downloads/Thing.app").level == "confirm"
+    assert classify_open("shortcuts://run-shortcut?name=x").level == "confirm"
+    assert classify_open("x-apple.systempreferences:com.apple.preference.general").level == "ok"
+    assert classify_shell("open ~/PilotEval/tools/fix.command", sc).level == "confirm"
+    assert classify_shell("open -a TextEdit ~/PilotEval/note.txt", sc).level == "ok"
+    # "Delete" in the request authorises a Delete button, not "Delete all".
+    assert classify_label("Delete", "AXButton", sc).level == "ok"
+    assert classify_label("Delete all drafts", "AXButton", sc).level == "confirm"
+    assert classify_label("Delete all", "AXButton", TaskScope.from_task("delete all my drafts")).level == "ok"

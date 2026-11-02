@@ -20,7 +20,8 @@ from .env import MacEnv
 from .mac import apps
 from .mac.ax import Node
 from .providers.jev import Jev
-from .safety import Aborted, Policy, Verdict, classify_key, classify_label, classify_script, classify_shell, kill_switch_engaged
+from .safety import (Aborted, Policy, Verdict, classify_key, classify_label, classify_open, classify_script, classify_shell,
+                     kill_switch_engaged)
 from .types import ImagePart, ToolCall, ToolResult, ToolSpec
 from .web import Body, WebError
 
@@ -731,6 +732,8 @@ class Toolbox:
         target = call.args.get("target", "")
         if not target:
             return ToolResult(call.id, False, "open needs target.")
+        if msg := self._check(classify_open(target, self.policy.scope), f"open {target}"):
+            return ToolResult(call.id, False, msg)
         before = self.env.frontmost()[0]
         app = call.args.get("app")
         if not app and os.environ.get("PILOT_BROWSER") and re.match(r"^[a-z][a-z0-9+.-]*://", target.strip(), re.I):

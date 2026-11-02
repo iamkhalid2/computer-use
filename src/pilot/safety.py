@@ -36,7 +36,8 @@ READ_ONLY_CMDS = {
     "system_profiler", "networksetup", "scutil", "ifconfig", "ping", "dig", "host", "textutil", "open",
     "basename", "dirname", "realpath", "test", "true", "env", "printenv", "osascript",
 }
-WRITE_FLAGS = {"find": {"-delete", "-exec", "-execdir", "-ok"}, "sed": {"-i"}, "defaults": {"write", "delete", "import"},
+WRITE_FLAGS = {"find": {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}, "sed": {"-i"},
+               "sort": {"-o", "--output"}, "textutil": {"-output"}, "defaults": {"write", "delete", "import"},
                "networksetup": {"-set", "-setairportpower", "-setdnsservers"}, "osascript": {"*"}}
 RISKY_SCRIPT = re.compile(
     r"\b(delete|empty trash|send|purchase|shut ?down|restart|log ?out|erase|do shell script|move .* to trash|"
@@ -56,6 +57,15 @@ SCOPE_VERBS = ["submit", "send", "delete", "remove", "move to trash", "post", "p
                "replace", "discard", "reset", "transfer", "pay", "buy", "purchase", "checkout", "sign out", "log out"]
 FILE_WRITERS = {"mkdir", "mv", "cp", "touch", "tee", "ln"}
 FILE_DELETERS = {"rm", "rmdir"}
+# Commands that run another command: judge the command they run, not the wrapper.
+WRAPPERS = {"env", "nice", "nohup", "time", "command", "exec", "xargs", "caffeinate", "timeout", "gtimeout"}
+# Opening these runs code (apps, scripts, installers), so it needs the same approval as running it.
+EXECUTABLE_SUFFIXES = {".app", ".command", ".sh", ".tool", ".terminal", ".pkg", ".mpkg", ".dmg", ".scpt", ".scptd",
+                       ".applescript", ".workflow", ".shortcut", ".jar", ".py", ".rb", ".pl", ".js", ".webloc", ".inetloc"}
+# Link schemes that only show something; any other deep link can make an app act (run a shortcut, start a call).
+VIEW_SCHEMES = {"http", "https", "mailto", "x-apple.systempreferences"}
+APP_DIRS = ("/Applications/", "/System/Applications/", "/System/Library/CoreServices/", os.path.expanduser("~/Applications/"))
+BULK = re.compile(r"\b(all|every|everything|entire)\b", re.I)
 CURL_WRITE_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file",
                     "-X", "--request", "-o", "--output", "-O", "--remote-name", "-K", "--config"}
 
@@ -68,6 +78,7 @@ class TaskScope:
     origins: set[str] = field(default_factory=set)  # scheme://host:port of URLs in the task
     roots: list[Path] = field(default_factory=list)  # folders the task names (or configured write roots)
     verbs: set[str] = field(default_factory=set)
+    bulk: bool = False  # the request itself says "all" or "every": "Delete" never authorises "Delete all" otherwise
 
     @classmethod
     def from_task(cls, task: str, extra_roots: list[str] | None = None) -> "TaskScope":
@@ -82,7 +93,7 @@ class TaskScope:
         roots += [Path(os.path.expanduser(r)).resolve() for r in (extra_roots or [])]
         low = task.lower()
         verbs = {v for v in SCOPE_VERBS if re.search(rf"\b{re.escape(v)}\b", low)}
-        return cls(origins, roots, verbs)
+        return cls(origins, roots, verbs, bool(BULK.search(low)))
 
     def allows_url(self, url: str) -> bool:
         u = urlparse(url)
@@ -94,6 +105,8 @@ class TaskScope:
 
     def allows_label(self, label: str) -> bool:
         low = (label or "").lower()
+        if BULK.search(low) and not self.bulk:
+            return False
         return any(re.search(rf"\b{re.escape(v)}\b", low) for v in self.verbs)
 
 
@@ -129,7 +142,26 @@ def _segment_verdict(segment: str, scope: TaskScope | None = None, cwd: str | No
     if not words:
         return Verdict("ok"), cwd
     cmd = words[0].rsplit("/", 1)[-1]
+    if cmd in WRAPPERS:
+        rest = words[1:]
+        if cmd == "command" and {"-v", "-V"} & set(rest):
+            return Verdict("ok"), cwd  # a lookup, runs nothing
+        while rest and (rest[0].startswith("-") or (cmd == "env" and "=" in rest[0]) or re.fullmatch(r"[\d.]+[smhd]?", rest[0])):
+            rest = rest[1:]
+        if not rest:
+            return Verdict("ok" if cmd in {"env", "time"} else "confirm", f"`{cmd}` with nothing to run"), cwd
+        return _segment_verdict(shlex.join(rest), scope, cwd)
     args = [w for w in words[1:] if not w.startswith("-")]
+    if cmd == "open":
+        targets = [a for i, a in enumerate(words[1:], 1) if not a.startswith("-") and words[i - 1] not in {"-a", "-b"}]
+        for t in targets:
+            if (v := classify_open(t, scope)).level != "ok":
+                return v, cwd
+        return Verdict("ok"), cwd
+    if cmd == "awk" and any("system(" in w for w in words[1:]):
+        return Verdict("confirm", "`awk` running a command"), cwd
+    if cmd == "textutil" and {"-convert", "-cat"} & set(words) and "-stdout" not in words:
+        return Verdict("confirm", "`textutil` writing a file"), cwd
     if cmd == "cd":
         return Verdict("ok"), (args[0] if args else cwd)
     if scope is not None and cmd in {"curl", "wget"}:
@@ -146,6 +178,23 @@ def _segment_verdict(segment: str, scope: TaskScope | None = None, cwd: str | No
     if "*" in bad or any(w in bad for w in words[1:]):
         return Verdict("confirm", f"`{cmd}` with write options"), cwd
     return Verdict("ok"), cwd
+
+
+def classify_open(target: str, scope: TaskScope | None = None) -> Verdict:
+    """Opening a page or a document only shows it; opening an app bundle, a script or an installer runs code,
+    and a deep link can make an app act, so those need the user's say-so."""
+    t = target.strip()
+    m = re.match(r"^([a-z][a-z0-9+.-]*):", t, re.I)
+    if m and not re.match(r"^[a-z]:[\\/]", t, re.I):
+        if m.group(1).lower() in VIEW_SCHEMES or (scope is not None and scope.allows_url(t)):
+            return Verdict("ok")
+        return Verdict("confirm", f"opening a {m.group(1)}: link can make an app act")
+    path = Path(os.path.expanduser(t))
+    if path.suffix.lower() == ".app" and any(str(path.resolve()).startswith(d) for d in APP_DIRS):
+        return Verdict("ok")  # launching an installed app
+    if path.suffix.lower() in EXECUTABLE_SUFFIXES or (path.is_file() and os.access(path, os.X_OK)):
+        return Verdict("confirm", f"opening {path.name} runs it")
+    return Verdict("ok")
 
 
 def classify_script(script: str) -> Verdict:
