@@ -512,6 +512,8 @@ class Toolbox:
         if not self.env.use_ax:
             return None, "Accessibility is unavailable; use computer clicks."
         if a.get("id") is not None:
+            if self.env.registry_stale:  # an old ref can still resolve, to whatever element now holds it
+                return None, f"Element ids are from before the page changed. Take a screenshot to refresh ids, then use [{a['id']}]'s new id."
             node = self.env.registry.get(int(a["id"]))
             if node is None:
                 return None, f"No element [{a['id']}] in the latest list. Take a screenshot to refresh ids."
@@ -748,6 +750,7 @@ class Toolbox:
                 break
             time.sleep(0.1)
         time.sleep(0.2)
+        self.env.registry_stale = True
         return ToolResult(call.id, True, f"{res.output}. Frontmost: {self.env.frontmost()[1]}.")
 
     def t_applescript(self, call: ToolCall) -> ToolResult:

@@ -66,6 +66,7 @@ class FakeEnv:
         self.geometry = Geometry.make(1000, 600, 2000, 1200, 1568)
         self.use_ax = use_ax
         self.registry = {}
+        self.registry_stale = False
         self.next_id = 1
         self.last_snapshot = None
         self.last_image = None
@@ -577,3 +578,18 @@ def test_restart_keeps_the_first_reads_of_a_long_step(monkeypatch, tmp_path):
     lead = executor.logs[1][0][1][0].text
     lines = [ln for ln in lead.splitlines() if ln[:1].isdigit()]
     assert len(lines) > 12 and lines[0].startswith("1. shell") and "Country: Kenya" in lines[0]  # more than a frame's 12, the read first
+
+
+def test_ids_from_before_an_open_are_refused(monkeypatch, tmp_path):
+    # Seen live: open claim.html, then set_value by ids from the previous page; the values landed one field off.
+    from pilot.mac import apps
+    from pilot.types import ToolCall
+
+    agent, env = make(monkeypatch, tmp_path, None, FakeProvider(ModelSpec("fake", "executor-model"), sessions=[[]]), use_ax=True)
+    env.registry = {1: Node("AXTextField", label="Employee ID", frame=(0, 0, 50, 10), ref=SimpleNamespace(), id=1)}
+    monkeypatch.setattr(apps, "open_target", lambda target, app=None: SimpleNamespace(ok=True, output=f"opened {target}"))
+    tb = agent.toolbox
+    assert tb._resolve({"id": 1})[0] is not None
+    assert tb.execute(ToolCall("c1", "open", {"target": "http://127.0.0.1:9/claim.html"})).ok
+    node, msg = tb._resolve({"id": 1})
+    assert node is None and "before the page changed" in msg

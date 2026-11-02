@@ -24,6 +24,7 @@ class MacEnv:
         self.image_format = image_format
         self.use_ax = use_ax and self.ax.trusted()
         self.registry: dict[int, Node] = {}
+        self.registry_stale = False  # the screen changed (e.g. a page opened) since the element list was taken
         self.next_id = 1
         self.last_snapshot: Snapshot | None = None
         self.last_image: Image.Image | None = None
@@ -76,6 +77,7 @@ class MacEnv:
         if self.compact:
             snap.nodes = ol.compact(snap.nodes)
         self.registry = {}
+        self.registry_stale = False
         self.next_id = ol.number(snap.nodes, 1)
         for n in snap.nodes:
             self.registry[n.id] = n

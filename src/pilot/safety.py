@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 RISKY_LABEL = re.compile(
     r"\b(send|delete|remove|erase|purchase|buy|pay|place order|checkout|check out|submit|transfer|"
     r"empty trash|move to trash|sign out|log out|uninstall|format|publish|post|tweet|reply all|"
-    r"confirm payment|subscribe|unsubscribe|wipe|reset|discard|don.t save|replace)\b",
+    r"confirm payment|subscribe|unsubscribe|wipe|reset|discard|don.t save|replace|force quit|quit)\b",
     re.I,
 )
 
@@ -34,7 +34,7 @@ READ_ONLY_CMDS = {
     "file", "stat", "du", "df", "mdfind", "mdls", "grep", "rg", "find", "sw_vers", "uname", "pbpaste",
     "defaults", "plutil", "sort", "uniq", "cut", "tr", "awk", "sed", "jq", "ps", "pgrep", "lsof", "uptime",
     "system_profiler", "networksetup", "scutil", "ifconfig", "ping", "dig", "host", "textutil", "open",
-    "basename", "dirname", "realpath", "test", "true", "env", "printenv", "osascript",
+    "basename", "dirname", "realpath", "test", "true", "env", "printenv", "osascript", "sleep",
 }
 WRITE_FLAGS = {"find": {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}, "sed": {"-i"},
                "sort": {"-o", "--output"}, "textutil": {"-output"}, "defaults": {"write", "delete", "import"},
@@ -54,7 +54,14 @@ class Verdict:
 
 # Verbs whose mention in the user's own request authorises the matching button.
 SCOPE_VERBS = ["submit", "send", "delete", "remove", "move to trash", "post", "publish", "subscribe", "unsubscribe",
-               "replace", "discard", "reset", "transfer", "pay", "buy", "purchase", "checkout", "sign out", "log out"]
+               "replace", "discard", "reset", "transfer", "pay", "buy", "purchase", "checkout", "sign out", "log out",
+               "kill", "terminate", "quit", "force quit"]
+# A verb also authorises the buttons that carry it out under another name ("buy" -> "Place order").
+IMPLIES = {"buy": ["place order", "complete order", "complete purchase", "buy now", "pay", "purchase", "checkout", "check out"],
+           "kill": ["quit", "force quit"], "terminate": ["quit", "force quit"]}
+IMPLIES["purchase"] = IMPLIES["buy"]
+KILL_VERBS = {"kill", "terminate", "quit", "force quit"}
+KILLERS = {"kill", "pkill", "killall"}
 FILE_WRITERS = {"mkdir", "mv", "cp", "touch", "tee", "ln"}
 FILE_DELETERS = {"rm", "rmdir"}
 # Commands that run another command: judge the command they run, not the wrapper.
@@ -79,6 +86,7 @@ class TaskScope:
     roots: list[Path] = field(default_factory=list)  # folders the task names (or configured write roots)
     verbs: set[str] = field(default_factory=set)
     bulk: bool = False  # the request itself says "all" or "every": "Delete" never authorises "Delete all" otherwise
+    text: str = ""  # the request, lowercased: a process may be stopped only if the user named it
 
     @classmethod
     def from_task(cls, task: str, extra_roots: list[str] | None = None) -> "TaskScope":
@@ -93,7 +101,7 @@ class TaskScope:
         roots += [Path(os.path.expanduser(r)).resolve() for r in (extra_roots or [])]
         low = task.lower()
         verbs = {v for v in SCOPE_VERBS if re.search(rf"\b{re.escape(v)}\b", low)}
-        return cls(origins, roots, verbs, bool(BULK.search(low)))
+        return cls(origins, roots, verbs, bool(BULK.search(low)), low)
 
     def allows_url(self, url: str) -> bool:
         u = urlparse(url)
@@ -107,7 +115,37 @@ class TaskScope:
         low = (label or "").lower()
         if BULK.search(low) and not self.bulk:
             return False
-        return any(re.search(rf"\b{re.escape(v)}\b", low) for v in self.verbs)
+        allowed = self.verbs | {i for v in self.verbs for i in IMPLIES.get(v, [])}
+        return any(re.search(rf"\b{re.escape(v)}\b", low) for v in allowed)
+
+    def names(self, word: str) -> bool:
+        """The user's request names this process (a whole word of 3+ characters, not a number)."""
+        w = word.lower().rsplit("/", 1)[-1]
+        return len(w) >= 3 and not w.isdigit() and re.search(rf"(?<![\w-]){re.escape(w)}(?![\w-])", self.text) is not None
+
+    def allows_kill(self, cmd: str, words: list[str]) -> bool:
+        """`kill`, `pkill` or `killall` aimed only at processes the user asked to stop, by name."""
+        if not self.verbs & KILL_VERBS:
+            return False
+        targets, skip = [], False
+        for w in words[1:]:
+            if skip:
+                skip = False
+            elif w in {"-s", "-n", "-u", "-U", "-g", "-G", "-t"}:
+                skip = True  # takes a value (signal, user, group, tty)
+            elif not w.startswith("-"):
+                targets.append(w)
+        if not targets:
+            return False
+        if cmd == "kill":
+            return all(t.isdigit() and int(t) > 1 and self.names_process(int(t)) for t in targets)
+        return all(self.names(t) for t in targets)
+
+    def names_process(self, pid: int) -> bool:
+        import subprocess
+
+        ps = subprocess.run(["ps", "-p", str(pid), "-o", "uid=,args="], capture_output=True, text=True).stdout.split()
+        return len(ps) >= 2 and ps[0] == str(os.getuid()) and any(self.names(w) for w in ps[1:])
 
 
 def classify_shell(command: str, scope: TaskScope | None = None) -> Verdict:
@@ -126,6 +164,18 @@ def classify_shell(command: str, scope: TaskScope | None = None) -> Verdict:
         if v.level != "ok":
             return v
     return Verdict("ok")
+
+
+def _scoped_find_delete(words: list[str], scope: TaskScope, cwd: str | None) -> bool:
+    """`find <roots> ... -delete` whose only write is -delete and whose roots all lie in a folder the user named."""
+    if {w for w in words if w in WRITE_FLAGS["find"]} != {"-delete"}:
+        return False
+    roots = []
+    for w in words[1:]:
+        if w.startswith(("-", "(", "!")):
+            break
+        roots.append(w)
+    return all(_in_scope(r, scope, cwd) for r in (roots or ["."]))
 
 
 def _in_scope(arg: str, scope: TaskScope, cwd: str | None) -> bool:
@@ -168,6 +218,10 @@ def _segment_verdict(segment: str, scope: TaskScope | None = None, cwd: str | No
         urls = [a for a in args if a.startswith(("http://", "https://"))]
         if urls and all(scope.allows_url(u) for u in urls) and not CURL_WRITE_FLAGS & set(words[1:]):
             return Verdict("ok"), cwd  # reading a page the user pointed at
+    if scope is not None and cmd in KILLERS and scope.allows_kill(cmd, words):
+        return Verdict("ok"), cwd  # stopping the process the user named
+    if scope is not None and cmd == "find" and scope.verbs & {"delete", "remove"} and _scoped_find_delete(words, scope, cwd):
+        return Verdict("ok"), cwd  # deleting inside a folder the user named, as asked
     if scope is not None and (cmd in FILE_WRITERS or (cmd in FILE_DELETERS and scope.verbs & {"delete", "remove"})):
         paths = [a for a in args if a not in {"-p"}]
         if paths and all(_in_scope(a, scope, cwd) for a in paths):

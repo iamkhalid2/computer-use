@@ -228,3 +228,34 @@ def test_wrappers_opened_code_and_bulk_buttons_need_the_users_say_so():
     assert classify_label("Delete", "AXButton", sc).level == "ok"
     assert classify_label("Delete all drafts", "AXButton", sc).level == "confirm"
     assert classify_label("Delete all", "AXButton", TaskScope.from_task("delete all my drafts")).level == "ok"
+
+
+def test_the_users_words_authorise_buying_killing_and_scoped_deletes():
+    import subprocess
+    import time
+
+    from pilot.safety import TaskScope, classify_label, classify_shell
+
+    buy = TaskScope.from_task("Buy just the e-book at http://127.0.0.1:9/checkout.html with the saved test card.")
+    assert classify_label("Place order", "AXButton", buy).level == "ok"  # "buy" is carried out by "Place order"
+    assert classify_label("Subscribe", "AXButton", buy).level == "confirm"
+    logs = TaskScope.from_task("Delete all the .log files in ~/PilotEval/logs. Keep everything else.")
+    assert classify_shell('cd ~/PilotEval/logs && find . -name "*.log" -print -delete', logs).level == "ok"
+    assert classify_shell('find ~/Documents -name "*.log" -delete', logs).level == "confirm"  # outside the named folder
+    assert classify_shell('find . -name "*.log" -delete', logs).level == "confirm"  # no known folder
+    assert classify_shell('find ~/PilotEval/logs -name "*.log" -exec rm {} ;', logs).level == "confirm"  # -exec runs anything
+    count = TaskScope.from_task("How many CSV files are in ~/PilotEval/data?")
+    assert classify_shell("find ~/PilotEval/data -name q3.csv -delete", count).level == "confirm"  # deleting was never asked for
+    proc = subprocess.Popen(["bash", "-c", "exec -a pilot_test_sleeper sleep 30"])
+    try:
+        time.sleep(0.3)
+        kill = TaskScope.from_task("pilot_test_sleeper is hogging my Mac. Kill it.")
+        assert classify_shell(f"kill {proc.pid}; sleep 1; pgrep -fl pilot_test_sleeper", kill).level == "ok"
+        assert classify_shell("pkill -f pilot_test_sleeper", kill).level == "ok"
+        assert classify_shell("kill 1", kill).level == "confirm" and classify_shell("pkill Finder", kill).level == "confirm"
+        assert classify_shell(f"kill {proc.pid}", TaskScope.from_task("What is using my CPU?")).level == "confirm"
+    finally:
+        proc.kill()
+    # Quitting through a GUI is judged like a kill, so a blocked `kill` has no unguarded detour.
+    assert classify_label("Force Quit", "AXButton", kill).level == "ok"
+    assert classify_label("Quit", "AXButton", logs).level == "confirm"

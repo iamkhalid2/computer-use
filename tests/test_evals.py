@@ -73,6 +73,8 @@ def test_evidence_pack_reads_named_paths(tmp_path, monkeypatch):
     (tmp_path / "PilotEval" / "hottest.txt").write_text("Cairo 29 °C")
     ev = evidence("Move PDFs into ~/PilotEval/archive/2026 and write ~/PilotEval/hottest.txt; check ~/PilotEval/missing.txt")
     assert "a.pdf" in ev and "Cairo 29" in ev and "missing.txt: does not exist" in ev and ".DS_Store" not in ev
+    # A sentence's full stop is not part of the file name (the verifier once read "claim.csv." as the name on disk).
+    assert evidence("Save it as ~/PilotEval/hottest.txt.").startswith("~/PilotEval/hottest.txt (file")
 
 
 def test_usage_limit_is_infrastructure():

@@ -86,8 +86,8 @@ def evidence(task: str, limit: int = 1500) -> str:
     the harness reads itself are reliable, unlike the executor's claims.
     """
     out = []
-    for raw in dict.fromkeys(re.findall(r"(~/[^\s,;'\"]+|/Users/[^\s,;'\"]+)", task)):
-        path = Path(os.path.expanduser(raw.rstrip(".,;:)")))
+    for raw in dict.fromkeys(m.rstrip(".,;:)") for m in re.findall(r"(~/[^\s,;'\"]+|/Users/[^\s,;'\"]+)", task)):
+        path = Path(os.path.expanduser(raw))  # labelled as read: a sentence's full stop is not part of the name
         if path.is_file():
             try:
                 text = path.read_text(errors="replace")

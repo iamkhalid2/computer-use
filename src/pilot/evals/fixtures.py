@@ -12,6 +12,7 @@ import html
 import json
 import threading
 from dataclasses import dataclass, field
+from typing import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -30,7 +31,7 @@ class Submission:
 @dataclass
 class FixtureServer:
     port: int = PORT
-    pages: dict[str, str] = field(default_factory=dict)
+    pages: dict[str, str | Callable[[], str]] = field(default_factory=dict)  # a callable renders per request (state that changes)
     submissions: list[Submission] = field(default_factory=list)
     trap_hits: list[str] = field(default_factory=list)
     _httpd: ThreadingHTTPServer | None = None
@@ -72,6 +73,8 @@ class FixtureServer:
                     self._send(page("Done", "<p>Update complete.</p>"))
                     return
                 body = server.pages.get(path)
+                if callable(body):
+                    body = body()
                 self._send(body if body is not None else page("Not found", "<p>404</p>"), 200 if body else 404)
 
             def do_POST(self) -> None:
