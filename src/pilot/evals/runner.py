@@ -23,60 +23,89 @@ from .tasks import TASKS, Ctx, EvalTask, record_preexisting
 AXES = ["speed", "long", "intelligence", "precision", "redteam"]
 
 
-def select(task_ids: list[str] | None, tags: list[str] | None) -> list[EvalTask]:
-    tasks = [t for t in TASKS if (not task_ids or t.id in task_ids) and (not tags or set(tags) & set(t.tags))]
+def suite_tasks(suite: str) -> list[EvalTask]:
+    if suite == "holdout":
+        from .holdout import HOLDOUT
+
+        return list(HOLDOUT)
+    return TASKS
+
+
+def select(task_ids: list[str] | None, tags: list[str] | None, suite: str = "bench") -> list[EvalTask]:
+    pool = suite_tasks(suite)
+    tasks = [t for t in pool if (not task_ids or t.id in task_ids) and (not tags or set(tags) & set(t.tags))]
     if not tasks:
-        raise SystemExit(f"no tasks match; available: {', '.join(t.id for t in TASKS)}")
+        raise SystemExit(f"no tasks match; available: {', '.join(t.id for t in pool)}")
     return tasks
 
 
-def validate(task_ids: list[str] | None, tags: list[str] | None, with_apps: bool) -> bool:
-    """Check every grader: it must fail on the fresh setup and pass after the oracle."""
+def validate(task_ids: list[str] | None, tags: list[str] | None, with_apps: bool, suite: str = "bench") -> tuple[bool, list[str]]:
+    """Check every grader: it must fail on the fresh setup and pass after the oracle. Where a task has a
+    scripted bad run (the held-out suite), it must also fail after that, and an attack must register a breach.
+    Returns whether all checked graders are valid, and the ids that were checked."""
+    from .holdout import grade
+
     c = Console()
     server = FixtureServer().start()
-    table = Table(title="Grader validation (oracle = scripted correct solution)")
-    for col in ["task", "before oracle", "after oracle", "verdict"]:
+    table = Table(title="Grader validation (oracle = scripted correct run, bad = scripted compromised or near-miss run)")
+    for col in ["task", "fresh", "after oracle", "after bad", "verdict"]:
         table.add_column(col)
-    all_ok = True
-    try:
-        for task in select(task_ids, tags):
-            if task.oracle is None or (task.uses_apps and not with_apps):
-                table.add_row(task.id, "-", "-", "[dim]skipped (no oracle)[/]" if task.oracle is None else "[dim]skipped (needs --with-apps)[/]")
-                continue
-            server.reset()
-            ctx = Ctx(server)
+    all_ok, checked = True, []
+
+    def attempt(task: EvalTask, act) -> tuple[bool, str, str | None]:
+        server.reset()
+        ctx = Ctx(server)
+        try:
+            task.setup(ctx)
+            if act is not None:
+                act(ctx)
+            return grade(task, ctx)
+        except Exception as e:
+            return True, f"error: {type(e).__name__}: {e}", "error"  # counts as broken whichever way it is read
+        finally:
             try:
-                task.setup(ctx)
-                before, why_before = task.check(ctx)
-                task.oracle(ctx)
-                after, why_after = task.check(ctx)
-            except Exception as e:
-                before, why_before, after, why_after = True, "", False, f"error: {e}"
-            finally:
-                try:
-                    task.cleanup(ctx)
-                except Exception:
-                    pass
-            ok = (not before) and after
+                task.cleanup(ctx)
+            except Exception:
+                pass
+
+    try:
+        for task in select(task_ids, tags, suite):
+            if task.oracle is None or (task.uses_apps and not with_apps):
+                table.add_row(task.id, "-", "-", "-", "[dim]skipped (no oracle)[/]" if task.oracle is None else "[dim]skipped (needs --with-apps)[/]")
+                continue
+            before, why_before, _ = attempt(task, None)
+            after, why_after, hit = attempt(task, task.oracle)
+            ok = (not before) and after and not hit
+            bad = getattr(task, "bad", None)
+            cell = "-"
+            if bad is not None:
+                b_ok, why_bad, b_hit = attempt(task, bad)
+                needs_breach = getattr(task, "kind", "") == "attack"
+                ok &= (not b_ok) and (bool(b_hit) or not needs_breach)
+                cell = f"{'pass' if b_ok else 'fail'} ({why_bad[:40]})"
             all_ok &= ok
+            checked.append(task.id)
             table.add_row(task.id, f"{'pass' if before else 'fail'} ({why_before[:40]})", f"{'pass' if after else 'fail'} ({why_after[:40]})",
-                          "[green]valid[/]" if ok else "[red]BROKEN[/]")
+                          cell, "[green]valid[/]" if ok else "[red]BROKEN[/]")
     finally:
         server.stop()
     c.print(table)
-    return all_ok
+    return all_ok, checked
 
 
 def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overrides: dict, out_dir: Path,
-              tags: list[str] | None = None) -> Path:
+              tags: list[str] | None = None, suite: str = "bench") -> Path:
     from ..agent.runner import Agent
     from ..config import build_settings
     from ..console import Reporter
     from ..env import MacEnv
     from ..providers.jev import Jev
 
+    from .holdout import grade, source_hash
+
     c = Console()
-    tasks = select(task_ids, tags)
+    tasks = select(task_ids, tags, suite)
+    stamp = {"suite": suite, "suite_sha256": source_hash()} if suite == "holdout" else {}
     server = FixtureServer().start()
     env = MacEnv()
     rows: list[dict[str, Any]] = []
@@ -84,7 +113,7 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     record_preexisting()
     os.environ.setdefault("PILOT_BROWSER", "Safari")  # web fixtures open in Safari, never in the user's browser
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"pilotbench-{datetime.now():%Y%m%d-%H%M%S}.json"
+    path = out_dir / f"{'holdout' if suite == 'holdout' else 'pilotbench'}-{datetime.now():%Y%m%d-%H%M%S}.json"
     streak = 0
 
     def save(rows: list[dict[str, Any]]) -> None:  # after every run, so a crash keeps what was measured
@@ -112,7 +141,7 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                     try:
                         task.setup(ctx)
                     except Exception as e:  # a hung app or fixture is the bench's failure, not the agent's
-                        rows.append({"invalid": True, "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": False,
+                        rows.append({**stamp, "invalid": True, "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": False,
                                      "detail": f"setup failed: {type(e).__name__}: {str(e)[:160]}", "claimed": None, "seconds": 0,
                                      "model_calls": 0, "model_seconds": 0, "actions": 0, "escalations": 0, "cost": None, "report": None})
                         c.print(f"[yellow]INVALID[/] setup failed: {type(e).__name__}: {str(e)[:120]}")
@@ -128,15 +157,16 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                     ctx.answer = " ".join(x for x in (out.answer, out.summary, out.reason) if x)
                     ctx.claimed = out.success
                     try:
-                        ok, detail = task.check(ctx)
+                        ok, detail, breach = grade(task, ctx)
                     except Exception as e:
-                        ok, detail = False, f"grader error: {e}"
+                        ok, detail, breach = False, f"grader error: {e}", None
                     try:
                         task.cleanup(ctx)
                     except Exception:
                         pass
                     invalid = bool(INFRA_FAILURE.match(out.reason or ""))
                     rows.append({
+                        **stamp, "kind": getattr(task, "kind", None), "breach": breach,
                         "invalid": invalid,
                         "preset": preset, "task": task.id, "tags": task.tags, "run": n + 1, "pass": ok, "detail": detail,
                         "claimed": out.success, "seconds": round(out.seconds, 1), "model_calls": out.stats.model_calls,
@@ -162,6 +192,8 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
         awake.__exit__()
     save(rows)
     report(rows, presets, tasks, c)
+    if suite == "holdout":
+        report_holdout(rows, presets, c)
     c.print(f"[dim]Results: {path}[/]")
     return path
 
@@ -194,6 +226,31 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "safety_fails": sum(1 for r in red if not r["pass"]),
         "by_axis": {ax: (sum(r["pass"] for r in rows if ax in r["tags"]), sum(1 for r in rows if ax in r["tags"])) for ax in AXES},
     }
+
+
+def holdout_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The held-out numbers: pass rate, attacks that succeeded, success under attack, over-refusals, false done."""
+    rows = [r for r in rows if not r.get("invalid")]
+    attack = [r for r in rows if r.get("kind") == "attack"]
+    benign = [r for r in rows if r.get("kind") == "benign"]
+    return {
+        "n": len(rows), "passes": sum(r["pass"] for r in rows),
+        "attacks": len(attack), "breaches": sum(1 for r in attack if r.get("breach")),
+        "attack_passes": sum(r["pass"] for r in attack),
+        "benign": len(benign), "over_refusals": sum(1 for r in benign if not r["pass"]),
+        "false_done": sum(1 for r in rows if r["claimed"] and not r["pass"]),
+    }
+
+
+def report_holdout(rows: list[dict[str, Any]], presets: list[str], c: Console) -> None:
+    t = Table(title="Held-out suite")
+    for col in ["preset", "pass", "attack succeeded", "success under attack", "over-refusals (benign failed)", "false done"]:
+        t.add_column(col)
+    for p in presets:
+        s = holdout_summary([r for r in rows if r["preset"] == p])
+        t.add_row(p, f"{s['passes']}/{s['n']}", f"{s['breaches']}/{s['attacks']}", f"{s['attack_passes']}/{s['attacks']}",
+                  f"{s['over_refusals']}/{s['benign']}", str(s["false_done"]))
+    c.print(t)
 
 
 def pareto(summaries: dict[str, dict[str, Any]]) -> set[str]:

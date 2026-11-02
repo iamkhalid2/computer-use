@@ -130,9 +130,15 @@ def build(runs_dir: Path, evals_dir: Path, out_dir: Path) -> dict[str, int]:
     img_dir.mkdir(exist_ok=True)
     graded = outcomes(evals_dir)
     labels = load_labels(out_dir / "labels.json")
-    stats = {"frames": 0, "recorded": 0, "legacy": 0, "soft": 0, "hard": 0, "unlabeled": 0, "skipped_invalid": 0}
+    stats = {"frames": 0, "recorded": 0, "legacy": 0, "soft": 0, "hard": 0, "unlabeled": 0, "skipped_invalid": 0, "skipped_sealed": 0}
+    from ..tune.mine import is_sealed, sealed_keys
+
+    sealed = sealed_keys()
     with (out_dir / "frames.jsonl").open("w") as fh:
         for run in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            if is_sealed(run, sealed):  # held-out runs never become replay items: ablate and calibrate learn from those
+                stats["skipped_sealed"] += 1
+                continue
             meta = graded.get(run.name) or rated(run)
             if meta.get("invalid"):
                 stats["skipped_invalid"] += 1

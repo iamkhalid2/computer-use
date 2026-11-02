@@ -88,6 +88,17 @@ def run_index(evals_dir: Path, runs_dir: Path | None = None) -> tuple[dict[str, 
     return idx, rounds
 
 
+def sealed_keys() -> set[str]:
+    from ..evals.holdout import sealed_keys
+
+    return sealed_keys()
+
+
+def is_sealed(run_dir: Path, keys: set[str]) -> bool:
+    start = _start(run_dir / "events.jsonl")
+    return bool(start) and _text_key(start) in keys
+
+
 def _start(path: Path) -> str | None:
     try:
         with path.open() as fh:
@@ -196,9 +207,13 @@ def mine(runs_dir: Path, evals_dir: Path, tasks: list[Any], scope: str = "dev", 
         oldest = min(window) if window else ""
     clusters: dict[str, Cluster] = {}
     last_seen: dict[str, str] = {}
-    seen = {"runs": 0, "skipped_invalid": 0, "skipped_scope": 0, "skipped_old": 0, "executor_calls": 0, "executor_in": 0}
+    seen = {"runs": 0, "skipped_invalid": 0, "skipped_scope": 0, "skipped_old": 0, "skipped_sealed": 0, "executor_calls": 0, "executor_in": 0}
+    sealed = sealed_keys()
     for f in sorted(runs_dir.glob("*/events.jsonl")):
         run = f.parent.name
+        if is_sealed(f.parent, sealed):  # the held-out suite: never mined, in any scope
+            seen["skipped_sealed"] += 1
+            continue
         row = idx.get(run)
         if window is not None and run not in window and (row and not row.get("unlinked") or run < oldest):
             seen["skipped_old"] += 1

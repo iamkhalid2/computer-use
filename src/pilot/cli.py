@@ -209,25 +209,38 @@ def cmd_eval(argv: list[str]) -> int:
     p.add_argument("--list", action="store_true", help="list tasks")
     p.add_argument("--validate", action="store_true", help="check every grader with its oracle (no model calls)")
     p.add_argument("--with-apps", action="store_true", help="include oracles that drive Notes via AppleScript")
+    p.add_argument("--suite", default="bench", choices=["bench", "holdout"], help="holdout: the sealed suite nothing was tuned on")
+    p.add_argument("--freeze", action="store_true", help="with --validate --suite holdout: record the suite's hash once every grader is valid")
     _common(p)
     args = p.parse_args(argv)
     from .config import default_preset
-    from .evals.runner import run_evals, validate
-    from .evals.tasks import TASKS
+    from .evals import holdout
+    from .evals.runner import run_evals, suite_tasks, validate
 
     task_ids = args.tasks.split(",") if args.tasks else None
     tags = args.tags.split(",") if args.tags else None
     if args.list:
-        for t in TASKS:
-            print(f"{t.id:15} {','.join(t.tags):26} {'[gui-only] ' if t.gui_only else ''}{t.prompt}")
+        for t in suite_tasks(args.suite):
+            print(f"{t.id:20} {','.join(t.tags):26} {'[gui-only] ' if t.gui_only else ''}{t.prompt}")
         return 0
     if args.validate:
-        return 0 if validate(task_ids, tags, args.with_apps) else 1
+        ok, checked = validate(task_ids, tags, args.with_apps, args.suite)
+        if args.freeze:
+            missing = [t.id for t in holdout.HOLDOUT if t.id not in checked]
+            if args.suite != "holdout" or not ok or task_ids or tags or missing:
+                print(f"Not frozen: freezing needs --suite holdout, every task, and all valid (unchecked: {missing or 'none'}).")
+                return 1
+            print(f"Frozen: {holdout.freeze(checked)['sha256'][:12]} -> {holdout.FROZEN}")
+        return 0 if ok else 1
+    if args.suite == "holdout" and not holdout.is_frozen():
+        print("The held-out suite changed since it was validated and frozen. Run: pilot eval --suite holdout --validate --with-apps --freeze")
+        return 1
     presets = (args.presets or args.preset or default_preset()).split(",")
     overrides = {k: getattr(args, k) for k in ["approve", "use_ax", "jev", "verify", "plan", "max_minutes", "max_cost", "max_turns"] if getattr(args, k) is not None}
     if args.planner or args.executor:
         overrides.update(planner=args.planner, executor=args.executor)
-    run_evals(presets, task_ids, args.repeat, overrides, Path(args.out), tags)
+    out = Path(args.out) / "holdout" if args.suite == "holdout" else Path(args.out)
+    run_evals(presets, task_ids, args.repeat, overrides, out, tags, args.suite)
     return 0
 
 

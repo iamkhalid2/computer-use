@@ -270,6 +270,8 @@ Sixteen Mac tasks over five axes, graded by the real end state, never by a model
 pilot eval --list
 pilot eval --validate                     # every grader fails before, passes after a scripted correct solution
 pilot eval --presets sub,profiles/x.json  # compare presets or saved profiles
+pilot eval --suite holdout --validate --with-apps --freeze  # the sealed held-out suite: check graders three ways, then freeze
+pilot eval --suite holdout --presets sub,profiles/sub-web.json  # run it (refuses if the suite changed since it was frozen)
 ```
 
 The report shows pass rate per axis, median time, model time, cost, false "done" claims and safety failures, and marks the configurations on the success/speed/cost Pareto frontier. Fixtures run on 127.0.0.1, files live in `~/PilotEval`, web tasks open in Safari (never your own browser), the screen is held awake for the run, and runs lost to a locked screen, a provider outage or a usage limit are marked invalid instead of failed.
@@ -437,14 +439,17 @@ Two build orders drive the work. Done means built, tested offline and exercised 
 | Record every decision's full input; replay with a meaning-based grader, seeded from real failures | done: 700 frames, 25 curated hard items |
 | A local MLX model, scored on replay (free) | done: Qwen3.8-27B matches Sonnet's hard score item for item (17/19) and agrees on 22 of 23 decisions, with no protocol errors in 89 calls, at 44 s per decision |
 | Real-use feedback: thumbs up or down after each task | done: ratings feed replay items and `tune mine` |
-| A background browser body for web tasks | built (`web` tool, `web_body` knob): the bench's form, grid, drag-sort and dark-pattern fixtures pass their own end-state graders driven through the tool, offline; off in `sub` until a paired PilotBench run (screen against body) shows it wins |
+| A background browser body for web tasks | built and measured (`web` tool, `web_body` knob): paired PilotBench on the eight web tasks, `sub` against `sub-web`, both 8/8, 136 s against 135 s, 37 calls each, 33% fewer input tokens with the body (n=1). It did not win on time and calls, the pre-registered rule, so it stays off in `sub` |
+| A held-out suite nothing was tuned on | built, validated and frozen: 14 tasks (9 attacks, 3 scary-but-benign, 2 long multi-app), `pilot eval --suite holdout`; every grader fails fresh, passes its scripted correct run and fails its scripted compromised or near-miss run; its runs are sealed out of `tune mine` and replay; not yet run on an agent |
 
 **Next, in order**
 
-1. **Measure the browser body**: a paired PilotBench run on the eight web tasks, `sub` against `profiles/sub-web.json`, and turn `web_body` on in `sub` only if it wins on time and calls without losing a pass.
-2. **Make `accept` repeat each task** (one flaky base failure carried the `context_budget` decision), and refresh the sealed test split from rated real runs.
-3. **Prefix caching for local models**: the 2.5k-token system prompt is re-read on every local call (about 40% of its prefill); mlx-vlm reuses a cached prefix only when no image follows it, so this needs a cache snapshot taken before the screenshot.
-4. Grow the grounded replay set (26 recorded grounded decisions so far; every run adds more) and repeat each ablation test rather than trusting one sample.
+1. **Run the held-out suite once**, paired `sub` against `profiles/sub-web.json`, and report pass rate, attacks that succeeded, success under attack, over-refusals and false "done" claims.
+2. **Fix what it exposes and run again**, reported separately: the second run is no longer held out.
+3. **First-run usability**: bare `pilot` and `pilot doctor` check Chrome and the Claude CLI sign-in; errors say what to do next; the install path works from scratch.
+4. **Make `accept` repeat each task** (one flaky base failure carried the `context_budget` decision), and refresh the sealed test split from rated real runs.
+5. **Prefix caching for local models**: the 2.5k-token system prompt is re-read on every local call (about 40% of its prefill); mlx-vlm reuses a cached prefix only when no image follows it, so this needs a cache snapshot taken before the screenshot.
+6. Grow the grounded replay set and repeat each ablation test rather than trusting one sample.
 
 ## License
 
