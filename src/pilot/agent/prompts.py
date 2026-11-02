@@ -35,11 +35,16 @@ RULES: list[tuple[str, str, bool]] = [
 TUNABLE_RULES = ["action_priority"] + [rid for rid, _, safety in RULES if not safety]
 
 
-def build_executor(rules: list[str] | None = None) -> str:
+WEB = """Web pages: `web` is a background browser Pilot owns. It never touches the screen and has its own cookies, so it is signed in to none of the user's accounts. Use it for every web page unless the task needs the user's own signed-in browser or a page they will watch. After your web actions the page arrives as its accessibility tree; act on elements by `ref` (e42), which stays valid while the element exists. Fill fields with `fill`, dropdowns with `select`, tick boxes and press buttons with `click`. Batch several web actions in one turn when you know the page."""
+
+
+def build_executor(rules: list[str] | None = None, web: bool = False) -> str:
     enabled = set(TUNABLE_RULES if rules is None else rules)
     parts = [EXECUTOR_HEADER]
     if "action_priority" in enabled:
         parts.append(ACTION_PRIORITY)
+    if web:
+        parts.append(WEB)
     bullets = [f"- {text}" for rid, text, safety in RULES if safety or rid in enabled]
     parts.append("Rules:\n" + "\n".join(bullets))
     return "\n\n".join(parts)
@@ -61,6 +66,16 @@ Reply with JSON only."""
 VERIFIER = """You check whether a computer-use task on macOS is complete, using the current screenshot, the accessibility element list and the executor's log. Be skeptical of the executor's claims, but trust evidence the harness read from disk: when it shows the required end state (file contents, folder listings), that is proof even if the screenshot shows something else. If the user asked for information, write the final `answer` from what is visible. If the task is not complete, state exactly what is missing and give the remaining steps (same format as a plan). Reply with JSON only."""
 
 REPLANNER = """You plan for a computer-use agent on macOS (tools: ui, find, menu, open, applescript, shell, computer, wait_for). The executor escalated: it is stuck, or the plan did not match reality. Using the screenshot, element list and log, write `advice` (what went wrong and the better approach) and the remaining steps, replacing the old ones. A refused action is a safety decision, not a puzzle: never retry it, but do use the allowed route (for example write_file for creating a file, the GUI when AppleScript is not permitted). Change approach if the old one is failing; prefer keyboard shortcuts, menu commands, direct URLs and AppleScript. If the evidence shows the task cannot be done on this Mac, set `impossible` true, explain in `advice`, and return no steps. Reply with JSON only."""
+
+WEB_PLANNING = ("The executor also has `web`, a background browser Pilot owns (no screen, its own cookies): plan web pages for it "
+                "unless the task needs the user's own signed-in browser, and read its page from the 'Background browser' text, "
+                "not from the screenshot.")
+
+
+def planning(prompt: str, web: bool) -> str:
+    """A planner, replanner or verifier prompt, told about the background browser when it is on."""
+    return prompt.replace("Reply with JSON only.", WEB_PLANNING + " Reply with JSON only.") if web else prompt
+
 
 STEP_SCHEMA = {
     "type": "object",

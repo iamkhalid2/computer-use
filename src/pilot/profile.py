@@ -112,6 +112,8 @@ KNOBS: dict[str, Knob] = {k.name: k for k in [
     Knob("context_budget", "observation", "int", 0, "executor input tokens before its session restarts from a text history "
          "and the current screen (0: never; old screenshots and element lists are otherwise resent every turn)", lo=0, hi=200000),
     Knob("settle_timeout", "observation", "float", 1.5, "seconds to wait for the screen to stop changing before a screenshot", lo=0.0, hi=4.0),
+    Knob("web_body", "observation", "bool", False, "web pages in a background browser Pilot owns, read as their accessibility tree "
+         "and driven by element ref, instead of a browser on screen"),
     # scaffold: harness behaviours a smarter model may not need
     Knob("evidence_gate", "scaffold", "bool", True, "on write tasks, show the disk state before accepting done"),
     Knob("loop_window", "scaffold", "int", 3, "identical turns before a 'change approach' note (0: off)", lo=0, hi=8),

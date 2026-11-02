@@ -66,6 +66,8 @@ Today it runs on Claude through the official Claude Code CLI with your own subsc
 | **Ground truth over impressions** | Before accepting "done" on a task that writes files, Pilot shows the executor what is actually on disk. The verifier gets the same evidence. A screenshot can show an uncommitted rename; the disk can't. |
 | **Reflexes, not reflection** | Screen-settle detection instead of fixed sleeps; waits for an editable field before typing; notes when actions changed nothing or repeat; all without a model call. |
 
+**Web pages without the screen** (the `web_body` knob; off in `sub` until a paired PilotBench run shows it wins). The `web` tool drives a headless Chrome, Edge, Chromium or Brave already installed on the Mac, in a profile Pilot owns (`~/.config/pilot/browser`): its own cookies, signed in to none of your accounts. It never takes the mouse, the keyboard or focus, and no Dock icon appears. Pilot talks to it over a private DevTools pipe, so it opens no port and needs no new dependency. The model reads each page as its accessibility tree, the same tree a screen reader gets, at about 150 tokens for the bench's application form, where a 1568 px screenshot alone costs about 2,100 before its element list. It acts by element ref (`e42`): a ref is the DOM node's own id, so it does not renumber between turns. Clicks, keys and pointer drags are trusted input events at the element's centre. A click is refused when something covers the target and names it, for example *"covered by div#ov ("Wait! Get 20% off…")"*, rather than landing on a dark-pattern overlay. Risky clicks, password fields and dangerous keys go through the same safety classifiers as on the screen; downloads are refused. The executor, planner and verifier all see the background page, and a turn of web actions alone skips the screen screenshot.
+
 ## Install
 
 ```bash
@@ -377,7 +379,8 @@ src/pilot/
   profile.py        the typed knob registry and Profile (the genome)
   profiles/         built-in profiles (sub.json: the live configuration, with evidence)
   agent/            runner.py (planner, executor, reflexes, recording) · prompts.py (sectioned executor prompt)
-  tools.py          action schemas and dispatcher: ui, find, menu, open, write_file, applescript, shell, wait_for, computer
+  tools.py          action schemas and dispatcher: ui, find, menu, open, write_file, applescript, shell, wait_for, computer, web
+  web/              body.py (the background browser: launch, page tree with refs, trusted input) · cdp.py (DevTools over a private pipe)
   safety.py         approval policy, classifiers, task-scoped authorisation, kill switch
   feedback.py       your thumbs up or down on a real run, and what it feeds
   env.py            observation: screenshot + element list, coordinates, configuration from the profile
@@ -412,6 +415,7 @@ Things the benchmark and traces taught, each now handled by the harness:
 * Calibrated values rest on small samples (a dozen decisions per effort, eight probe screens); larger runs need more quota.
 * Older traces lack element lists, so they replay screenshot-only; new runs record everything.
 * Jev (TypeSafe) support is experimental and off by default.
+* The background browser reads the main frame only (not iframes), refuses downloads, cannot upload files yet, and is signed in to nothing; tasks that need your own session stay on the screen.
 
 ### Where the build stands
 
@@ -433,11 +437,11 @@ Two build orders drive the work. Done means built, tested offline and exercised 
 | Record every decision's full input; replay with a meaning-based grader, seeded from real failures | done: 700 frames, 25 curated hard items |
 | A local MLX model, scored on replay (free) | done: Qwen3.8-27B matches Sonnet's hard score item for item (17/19) and agrees on 22 of 23 decisions, with no protocol errors in 89 calls, at 44 s per decision |
 | Real-use feedback: thumbs up or down after each task | done: ratings feed replay items and `tune mine` |
-| A background browser body for web tasks | not started |
+| A background browser body for web tasks | built (`web` tool, `web_body` knob): the bench's form, grid, drag-sort and dark-pattern fixtures pass their own end-state graders driven through the tool, offline; off in `sub` until a paired PilotBench run (screen against body) shows it wins |
 
 **Next, in order**
 
-1. **A background browser body**: web tasks in a headless engine Pilot owns (its own cookies, never your browser), driven through the DOM, so web steps neither take over the screen nor guess pixels.
+1. **Measure the browser body**: a paired PilotBench run on the eight web tasks, `sub` against `profiles/sub-web.json`, and turn `web_body` on in `sub` only if it wins on time and calls without losing a pass.
 2. **Make `accept` repeat each task** (one flaky base failure carried the `context_budget` decision), and refresh the sealed test split from rated real runs.
 3. **Prefix caching for local models**: the 2.5k-token system prompt is re-read on every local call (about 40% of its prefill); mlx-vlm reuses a cached prefix only when no image follows it, so this needs a cache snapshot taken before the screenshot.
 4. Grow the grounded replay set (26 recorded grounded decisions so far; every run adds more) and repeat each ablation test rather than trusting one sample.

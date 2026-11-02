@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import statistics
 import time
 from datetime import datetime
@@ -15,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..mac.apps import KeepAwake, screen_locked
+from ..web import temp_dir
 from .fixtures import FixtureServer
 from .tasks import TASKS, Ctx, EvalTask, record_preexisting
 
@@ -117,7 +119,12 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                         save(rows)
                         continue
                     time.sleep(0.4)
-                    out = Agent(settings, env, Reporter(), Jev()).run(task.render(ctx))
+                    body_dir = temp_dir()  # a fresh background-browser profile per run: no cookies carried between runs
+                    os.environ["PILOT_BODY_DIR"] = body_dir
+                    try:
+                        out = Agent(settings, env, Reporter(), Jev()).run(task.render(ctx))
+                    finally:
+                        shutil.rmtree(body_dir, ignore_errors=True)
                     ctx.answer = " ".join(x for x in (out.answer, out.summary, out.reason) if x)
                     ctx.claimed = out.success
                     try:

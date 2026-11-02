@@ -27,7 +27,7 @@ from ..mac import apps
 from ..providers import cost_of, get_provider
 from ..providers.jev import Jev
 from ..safety import Aborted, Policy, TaskScope
-from ..tools import MUTATING, Toolbox, build_specs
+from ..tools import MUTATING, OFFSCREEN, Toolbox, build_specs
 from ..trace import Trace
 from ..types import AssistantTurn, Observation, Part, TextPart, ToolResult
 from ..replay.record import DecisionRecorder, history_text
@@ -134,7 +134,8 @@ class Agent:
         g = env.geometry
         self.tools = build_specs(settings, self.space, (g.model_w, g.model_h), planner_mode=self.planner is not None, ax=env.use_ax)
         self.toolbox.schemas = {t.name: t.schema for t in self.tools}
-        self.system = prompts.build_executor(settings.profile.executor_rules)
+        self.web = settings.profile.web_body
+        self.system = prompts.build_executor(settings.profile.executor_rules, web=self.web)
         self.trace: Trace | None = None
         self.t0 = 0.0
         self.turns = 0
@@ -181,15 +182,18 @@ class Agent:
                        elements=obs.outline.count("\n[") + (1 if obs.outline.startswith("[") else 0))
         return obs
 
-    @staticmethod
-    def screen_parts(obs: Observation, lead: str) -> list[Part]:
-        # Instructions first, then the image, then the element list.
-        return [TextPart(lead), obs.image, TextPart(obs.text())]
+    def screen_parts(self, obs: Observation, lead: str) -> list[Part]:
+        # Instructions first, then the image, then the element list, then the background page if one is open.
+        parts: list[Part] = [TextPart(lead), obs.image, TextPart(obs.text())]
+        if (page := self.toolbox.web_view()) is not None:
+            parts.append(TextPart(page))
+        return parts
 
     # -- planner ---------------------------------------------------------------------------
     def _plan_call(self, system: str, lead: str, schema: dict[str, Any], label: str) -> dict[str, Any] | None:
         assert self.planner is not None
         obs = self.observe(label)
+        system = prompts.planning(system, self.web)
         try:
             data, turn = self.planner.complete_json(system, self.screen_parts(obs, lead), schema)
         except Exception as e:
@@ -332,8 +336,13 @@ class Agent:
                     self.r.action(call.name, call.args, res.ok, res.text, dt)
                 results.append(res)
                 failed = not res.ok
-                mutated = mutated or call.name in MUTATING or call.args.get("action") in MUTATING
+                if call.name not in OFFSCREEN:
+                    mutated = mutated or call.name in MUTATING or call.args.get("action") in MUTATING
 
+            # One view of the background page per turn, on its last web action: earlier ones would be stale.
+            ran_web = [r for c, r in zip(turn.calls, results) if c.name == "web" and not r.text.startswith("Not executed")]
+            if ran_web and ran_web[-1].image is None and (page := self.toolbox.web_view()) is not None:
+                ran_web[-1].text += "\n\n" + page
             rec.results(turn.calls, results)
             signal = self.toolbox.signal
             if signal and signal[0] == "escalate":
@@ -544,6 +553,7 @@ class Agent:
         except Exception as e:
             reason = f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e)
         seconds = time.monotonic() - self.t0
+        self.toolbox.close()
         if self.standby is not None and hasattr(self.standby, "close"):
             self.standby.close()
             self.standby = None
