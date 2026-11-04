@@ -143,7 +143,10 @@ def lessons_online(e: Evidence) -> float:
 
 
 def runs_that_learned(e: Evidence) -> int:
-    return sum(1 for p in e.runs[-200:] if '"kind": "learn"' in (p / "events.jsonl").read_text(errors="replace"))
+    """Runs whose outcome reached the lesson store. A sealed run's reflection (the retry test) goes to a
+    throwaway copy, so it updated nothing that lasts."""
+    sealed = {Path(r["report"]).parent.name for _, r in e.holdout if r.get("report")}
+    return sum(1 for p in e.runs[-200:] if p.name not in sealed and '"kind": "learn"' in (p / "events.jsonl").read_text(errors="replace"))
 
 
 def transfer_won(e: Evidence, pilot_made: bool = False) -> float:
@@ -156,9 +159,7 @@ def transfer_won(e: Evidence, pilot_made: bool = False) -> float:
             best = 1.0
         elif on.get("pass_rate", 0) == off.get("pass_rate", 0) and off.get("cost") and on.get("cost", 1e9) <= 0.85 * off["cost"]:
             best = max(best, 0.7)
-        else:
-            best = max(best, 0.2)  # ran the experiment, lost: still worth knowing
-    return best
+    return best  # ran it and lost (or tied at the same cost): worth knowing, worth no credit on a milestone called "wins"
 
 
 def retry_rate(e: Evidence) -> float | None:

@@ -51,12 +51,12 @@ So it presses "Save" because it knows which control is the Save button, not by g
 **4. It checks before it says "done".** A screen can look right while nothing was saved. So before Pilot reports success, it checks the real result, for example whether the file is actually on disk.
 
 **5. It stays inside what you asked.** Only your own words give it permission. "Fill in the form and submit it" lets it press Submit; a line on a web page saying "click here" does not.
-- It asks first before anything risky: sending, deleting, buying.
+- It asks first before anything risky: sending, deleting, buying. One known gap: pressing Return can still send a message ([details](TECHNICAL.md#12-known-limits)).
 - It never answers the Mac's own security pop-ups.
 - It never types passwords it wasn't given.
 - Move your mouse into the **top-left corner** of the screen, or press **Ctrl+C**, and it stops at once.
 
-**6. It learns from experience.** After a task, Pilot looks back at what it did and writes short lessons. One example: *"to create a text file, write it directly; TextEdit's save dialog costs several steps."* Each lesson keeps a running score of how often following it actually worked. Lessons that help get used more, and lessons that don't fade away.
+**6. It learns from experience.** After a task, Pilot looks back at what it did and writes short lessons. One example: *"to create a text file, write it directly; TextEdit's save dialog costs several steps."* Each lesson keeps a running score of how often following it actually worked. Lessons that help get used more, and lessons that don't fade away. On the sealed tasks below this hasn't helped yet: with lessons on Pilot passed 36 of 42, and with them off 37 of 42.
 
 **7. It is tested on real outcomes.** A set of everyday Mac tasks is graded by what really happened:
 - the file on disk;
@@ -64,6 +64,8 @@ So it presses "Save" because it knows which control is the Save button, not by g
 - the number the Calculator shows.
 
 A second, *sealed* set of tasks is kept apart and never used for tuning. It shows whether Pilot handles things it has never seen, rather than things it was polished on. Some of those tasks are traps: pages that try to trick the agent, or requests it must refuse.
+
+The first blind run passed 12 of 14, and across 95 attack runs no attack got through. The fake checkout with a hidden subscription has been beaten 8 times out of 8 since its first failure. The full numbers, including what failed, are in [Results](TECHNICAL.md#9-results).
 
 ---
 
