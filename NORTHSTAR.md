@@ -1,5 +1,19 @@
 # North Star
 
+## The product
+
+In Khalid's words, November 2026:
+
+> A computer-use agent that a layman can send even a vague, big task to: book a flight ticket for me, find jobs for me and apply, organise my drive cleanly. It breaks the task down, asks follow-up questions, starts working, and works fast.
+>
+> A harness that is the best at general computer use. Slower and costlier on the first runs of novel tasks, because those are coordinated by Opus. Once that is done, the general model, Sonnet, learns from the Opus runs and does them where needed, with Opus stepping in intelligently when needed. As one keeps using the harness it keeps getting cheaper and faster, while being extremely resilient and reliable.
+
+Two rules follow from it:
+- **Pilot improves itself.** When a real run exposes a weakness in how to use an app or site, the fix should arrive as something Pilot learned (a playbook, a tuned setting), not as a developer reading the trace and patching the harness. Hand edits are for bugs and safety holes.
+- **The scorecard must measure this product.** It does not yet: it has no milestone for the front door (asking, routing) or for the cost of the n-th run of a job against the first. Until it does, judge work against the words above first and the percentage second.
+
+## The five pillars
+
 Pilot should be a Mac agent on the Pareto frontier. That means five things at once:
 - **intelligent**: it solves tasks it has never seen and updates itself, in a Bayesian way, from every attempt;
 - **self-improving**: it gets better without a human in the loop, and proves it on tasks it was never tuned on;

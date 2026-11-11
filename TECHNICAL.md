@@ -7,15 +7,17 @@ The [README](README.md) is the short version. This is the long one, for anyone c
 
 Where the project stands today is in [PROGRESS.md](PROGRESS.md).
 
+The shape in one paragraph: a request first passes a **front desk** that asks only what the user alone can know. A **router** then picks who leads: the planner (Opus) on a new kind of job, the executor (Sonnet) on a kind Pilot holds a **playbook** for. The executor works in a loop of look, act and check, under a **guard** written in code. The result is verified against the real end state, and a success is distilled into a playbook whose trust is updated by every later outcome. A person can use all of it from a small **window** without a terminal.
+
 ## Contents
 
 1. [The problem, from first principles](#1-the-problem-from-first-principles)
-2. [The loop: observe, decide, act, check](#2-the-loop-observe-decide-act-check)
+2. [The loop: observe, decide, act, check](#2-the-loop-observe-decide-act-check): the window · the front desk
 3. [Safety: authority comes from your words](#3-safety-authority-comes-from-your-words)
 4. [Models and providers](#4-models-and-providers)
 5. [Profiles: the harness genome](#5-profiles-the-harness-genome)
 6. [Self-tuning](#6-self-tuning): calibrate · ablate and audit · mine, propose, accept · `context_budget`
-7. [Experience: lessons with a belief](#7-experience-lessons-with-a-belief)
+7. [Experience: lessons with a belief](#7-experience-lessons-with-a-belief): playbooks, cheaper and faster with use
 8. [Measuring it](#8-measuring-it): PilotBench · the sealed held-out suite · replay · real use · the scorecard
 9. [Results](#9-results)
 10. [Design notes and lessons](#10-design-notes-and-lessons)
@@ -127,6 +129,31 @@ Pilot splits the loop across four layers. They run from slow and smart at the to
 
 Some failures are not the agent's fault: a locked screen, a provider outage, a usage limit. In those cases Pilot stops cleanly and says why, instead of improvising.
 
+### The window: Pilot without the command line
+
+`pilot app --install` builds `~/Applications/Pilot.app`; `pilot app` opens the same window from a terminal. The agent is unchanged: it already speaks to people through one object, the `Reporter`, and the window is a second `Reporter` (`ui/session.py`) whose lines become events for a page and whose questions block the agent's thread until the page posts an answer.
+
+* **The window must not become part of the screen Pilot is driving.** It is a non-activating floating panel in an app with no Dock icon, so the app you were using stays frontmost and is what the agent sees and types into. The panel takes the keyboard only while it has a question on screen; while Pilot works it refuses key status, so pressing Stop steals nothing. It shrinks to a strip while Pilot works. Pilot's existing guards refuse any click or keystroke aimed at its own process.
+* **macOS grants permissions to an app, by name.** The bundle's executable is a small compiled launcher that starts this checkout's Python and waits for it. Permissions then belong to "Pilot" and cover the Python it starts; a shell-script app would appear in Privacy settings as `zsh`. Measured on first launch: the prompt read *“Pilot” would like to access files in your Documents folder* (the checkout lives there), and the window's first screen showed Claude connected and the two switches still off. The window never changes a setting itself: its buttons open the right pane and the user decides. "Restart Pilot" exits with a code the launcher answers by starting a fresh copy, which is when macOS applies a new Screen Recording grant.
+* **The control channel is closed to everything but Pilot's own page.** The server listens on 127.0.0.1 only, refuses any request whose Host is not exactly that address and port (a domain rebound to this Mac), requires a secret made at launch on every API call, and sends no cross-origin headers.
+* **Stop** is checked after every model call and every action, and while waiting for an answer. A model call already in flight finishes first (up to about 15 s for the planner).
+* **In plain words.** Actions are shown as "Pressed Save" or "Ran a command" with the command behind a disclosure; an approval for a shell command says so in a sentence and keeps the command one click away. The time shown at the end excludes time spent waiting for answers.
+
+Checked on 10 November 2026: the same vague job as below, run through the native window's real endpoints with a sandboxed agent: asked at 8.5 s, done in 49 s, verified by the planner, four of four files in Type/Year folders. That run exposed a false "couldn't finish": the disk evidence shown to the verifier listed only two folder levels, so a correct Type/Year tidy-up could not be confirmed. With a person present the evidence now lists every level.
+
+### The front desk: vague and big requests
+
+People don't write specifications. They write "book a flight for me" or "organise my drive". Before November 2026 nothing in Pilot was built for that: in 430 recorded runs it had never once asked the user a question or planned up front, because every task it had ever been given was a fully specified test.
+
+`intake.py` is one fast, text-only call to the executor model that returns four things: whether a careful assistant would simply start (`ready`), at most three questions only the user can answer (each with a default where one exists), a route of 3 to 6 milestones for a big job, and the goal in one sentence. It never sees the screen, so "what is in the folder" is never a reason to ask.
+
+* **It costs a clear task nothing.** The call runs while the executor takes its first look at the screen. When the verdict is "ready", that first turn is simply used. Measured on a clear task, three runs each way: first action at 2.5–2.9 s with the front desk and 2.5–2.7 s without.
+* **A vague task is asked about before anything is touched.** The executor's first turn is thrown away unexecuted, the route is shown, the questions are asked, and the run starts again from the answers.
+* **Answers last the whole run.** They are appended to the request itself, so every step brief, replan and final check works from them, and so does the disk evidence. Before this, an answer lived only in the executor session that asked; the next step or replan never saw it. Folders and sites the user types in an answer widen where Pilot may work. An answer never adds a verb: nothing said in passing can authorise a send, a purchase or a delete.
+* **A route becomes the plan.** Each milestone gets a fresh executor session and its own turn budget, and what a step found (its `answer`) is carried into every later step's brief. A milestone that says "show the user and wait for their yes" is done with `ask_user`.
+* **A long job checks in instead of dying.** At the time, cost or turn limit Pilot asks whether to keep going and extends by one allowance per yes. Time spent waiting for the user's answers is not counted.
+* **Only with a person present.** Evals, scripts and piped input have nobody to ask, so the front desk is off there and those runs behave exactly as before. `--no-ask` turns it off by hand; `pilot brief "…"` shows the verdict on its own.
+
 ## 3. Safety: authority comes from your words
 
 This follows from the fourth fact. Whatever is on the screen may have been written by someone else, and a model that reads it can be talked into things. So safety doesn't depend on the model behaving. It is code around the model, in the reflex layer. No profile, tuner or lesson can change it.
@@ -139,6 +166,8 @@ This follows from the fourth fact. Whatever is on the screen may have been writt
 
   It judges what an action does, not what it looks like. A command wrapped inside another command, code that gets opened rather than run, and bulk buttons such as "Delete all" are all judged by their effect.
 * **Then it checks the task's scope.** Your request is parsed once into what it authorises: the URLs, folders and actions it names. For example, "…and submit it" allows the Submit button, and "save it in ~/Reports" allows writing there. Only your words grant permission; nothing on the screen can, so an injected page can't.
+  - A verb named in order to forbid it authorises nothing: "fill it in but don't submit it" leaves Submit asking first. (Until November 2026 it allowed Submit, and "don't delete anything" allowed Delete.)
+  - Every line of a shell command is judged as its own command, and an operator inside quotes is text. (Until November 2026 only the first line was judged: `ls` on line one let an `rm` or an uploading `curl` on line two run unasked. All 431 shell commands in the recorded runs get the same verdict under the old and new guard.)
   - A risky action outside the scope is asked about first (with `--approve risky`, the default).
   - A risky action inside the scope goes ahead, because refusing the Submit button you asked for is a reliability bug too.
 * **Kill switch:** mouse into the top-left corner, or Ctrl+C.
@@ -324,6 +353,30 @@ Knob tuning changes how Pilot drives a model. Experience changes what it knows. 
 * **After a task**, one reflection call reads the trace. It decides which shown lessons were actually followed, and writes at most three new ones from what happened: a failure and its cause, a detour and the direct route. Only followed lessons are credited, with weight 1 when a grader or you judged the outcome and 0.5 when only Pilot's verifier did. A lesson becomes trusted when its posterior mean minus one standard deviation reaches 0.65, and is retired when the mean plus one standard deviation stays under 0.4.
 * **Nothing learned may weaken safety.** Lessons about getting around a refusal, a confirmation or the guard, or about obeying on-screen instructions, are refused. The guard enforces safety regardless.
 * **The sealed suite stays sealed.** Held-out runs only read lessons, so they never write or credit one. A transfer report counts as held out only when no lesson came from a sealed run. `--retry` reflects on a failed run in a throwaway copy of the store, sees only the binary verdict (never the grader's detail), and tries once more. That is the second-attempt test.
+
+### Playbooks: cheaper and faster with use
+
+Lessons are general tips meant to transfer to different tasks, and on the sealed suite they did not help. A playbook (`skills.py`) makes a narrower claim that can be tested: the second job of a kind costs less than the first.
+
+| When | Who leads | What happens |
+|---|---|---|
+| A new kind of job | The planner (Opus) | It plans from the screen and checks the result. Slower and dearer, on purpose. |
+| After it succeeds | | The executor model (Sonnet) reads the trace once and distils the route that worked: when it applies, the direct steps, what does not work in that app. No task data, and never a step that gets round a refusal. |
+| The same kind again | The executor (Sonnet) | It works from the playbook with no planner call. The planner steps in only if the executor escalates or the final check fails. |
+| Every outcome | | Updates a Beta belief that a run led from this playbook succeeds. A playbook starts at Beta(1 + w, 1) from the success it came from. Pilot's own verdict counts w = 0.5; a grader's or your thumbs counts 1. |
+
+The executor leads while the belief is at least even. Two self-judged failures, or one thumbs-down, drop it below that: the planner takes the job back, and its next success writes a fresh route with a fresh belief. A run the planner had to rescue earns half credit and rewrites the route. A run that was stopped, or that died on a usage limit, teaches nothing. A thumbs-down on a run that wrote a playbook deletes it. Big jobs also yield "part" playbooks (searching one site, driving one dialog) that are shown beside matching steps but never take the lead.
+
+Playbooks are on for everyday runs (the window and `pilot "task"`; `--no-learn` turns them off), off for evals unless an arm asks, and never read or written on the sealed suite. `pilot learn playbooks` lists them with their cold and warm cost; `pilot learn distil runs/<folder>` learns from a run that finished before they existed.
+
+**What is measured so far, and what is not.** Offline, with scripted models: the planner leads run one and is not called at all on run two; repeated failure hands the job back; a rescue rewrites the route (`tests/test_skills.py`). With the real model, one call: distilled from the real Spotify run, Pilot wrote for itself *"Do not wait_for text like 'Songs': Spotify exposes no readable text, so wait 2 seconds and read the screenshot"*, the same fix a developer had just hand-coded. Not yet measured: whether warm runs are in fact cheaper on screen. That is one command, run 1 cold and runs 2 and 3 warm on the same graded tasks:
+
+```bash
+pilot eval --playbooks --repeat 3 --tasks calculator,finder,textedit,archive-pdfs,apply-form
+pilot learn curve evals/pilotbench-<stamp>.json
+```
+
+Known limits: a task is matched to a playbook by shared words, so "put on some Skrillex" does not find the playbook that "play ... and queue ..." wrote; and the test above repeats the same tasks, which is the easiest form of repeat use.
 
 ### The update rule, precisely
 
@@ -523,6 +576,21 @@ Qwen's calibration overrode two defaults:
 
 Element ids hit 8/8. A 1024 px screenshot cost no accuracy, at about half the visual tokens of full size. The profile is `profiles/sub-mlx-mlx-community-qwen3-8-27b-4bit.json`.
 
+**First real tasks from the window** (10 and 11 November 2026). "Play Bangarang by Skrillex on Spotify and add Mumbai Power in queue": done in 45.8 s and 21 actions, confirmed in the final screenshot (the track playing, Spotify's "Added to queue" message), rated up by the user. The front desk judged it clear and cost 0.3 s. The trace showed 12.6 of those seconds lost to waits that cannot succeed in an app with no accessibility text: Spotify shows three elements. Those waits now give up early in such apps (a hand fix), and the playbook Pilot later distilled from the same run states the same rule in its own words, which is how such knowledge is meant to arrive from now on. A large trip-planning task was then started twice and did not finish: stopped by the user after 22 s, then ended by the plan's usage limit at 104 s, after one 18 s replan and three failed tries at a web dropdown.
+
+Those runs also showed that everyday runs were not using the tuned `sub` profile: only `--profile sub` loaded it, so `context_budget` was off and the executor's context grew from 10k to 51k tokens in eight turns. A preset with a tuned profile of the same name now loads it everywhere.
+
+**The front desk** (9 November 2026, Sonnet 5.5 at low effort, graded by fixed rules in `evals/intake.py`):
+
+| Set | Result |
+|---|---|
+| 12 vague requests that must be asked about (the first three are the mission's own: book a flight, find jobs and apply, organise my drive) | 12, 12 and 11 of 12 over three runs. The miss is "order my usual groceries", where it chose to look up past orders instead of asking |
+| 26 clear requests that must just start (10 everyday ones and the 16 bench prompts) | 26 of 26 in each of four runs |
+| The 14 sealed held-out prompts, read once after the prompt was fixed | 14 of 14 start, no needless question |
+| Time for the verdict | median 3.0–4.0 s, slowest 10.9 s; a clear task does not wait for it beyond 6 s |
+
+One vague job was then run end to end with real models and a scripted user, on a still picture instead of the screen, with only `shell` and `write_file` able to act and every approval prompt declined: "organise my drive cleanly", answered with a folder of 26 loose files. First question at 6.1 s; the exact move plan was shown and approved at 30 s; done in 143 s and 33 model calls, of which 65 s were four replans. Checked by hash afterwards: all 26 files present and unchanged, none left loose. The first attempt at this run failed, and exposed two faults since fixed: later steps never saw what earlier steps found, and the guard stopped a harmless `stat -f "%Sm|%N"` as unparseable.
+
 **Replay** (25 recorded decisions, about 40 s, no screen): hard items 17/19, soft 5/5. Both hard misses are model judgements the harness overrides live: clicking "Don't Allow" on a permission prompt, and claiming done while the path bar still read "untitled folder".
 
 Soft items reward agreement with a known-good choice, not the best choice: in calibration, Opus fetched a page with `curl` where the recorded action escalated, and dragged with explicit mouse-down/move/up where the reference used one drag action. Both count as misses today.
@@ -546,7 +614,7 @@ Things the benchmark and traces taught, each now handled by the harness:
 
 ```
 src/pilot/
-  cli.py            pilot: run, doctor, observe, eval, replay, feedback, profile, tune, presets, models
+  cli.py            pilot: run, app, brief, doctor, observe, eval, replay, feedback, profile, tune, presets, models
   config.py         settings (invariants and limits), presets, model specs
   profile.py        the typed knob registry and Profile (the genome)
   profiles/         built-in profiles (sub.json: the live configuration, with evidence)
@@ -554,13 +622,17 @@ src/pilot/
   tools.py          action schemas and dispatcher: ui, find, menu, open, write_file, applescript, shell, wait_for, computer, web
   web/              body.py (the background browser: launch, page tree with refs, trusted input) · cdp.py (DevTools over a private pipe)
   safety.py         approval policy, classifiers, task-scoped authorisation, kill switch
+  intake.py         the front desk: ready or ask, the questions, the route for a big job
+  ui/               the Pilot window: session.py (the Reporter for a window) · server.py (local, token-guarded) · page.html ·
+                    window.py (the floating panel) · bundle.py (builds Pilot.app) · app.py (`pilot app`)
   feedback.py       your thumbs up or down on a real run, and what it feeds
   experience.py     lessons with Beta posteriors: Thompson selection, reflection, credit, transfer reports
+  skills.py         playbooks: who leads a task (planner or executor), distilling the route that worked, the belief in it
   env.py            observation: screenshot + element list, coordinates, configuration from the profile
   outline.py        element list formatting, compaction, fuzzy matching
   mac/              screen.py (capture, Retina geometry) · input.py (Quartz events) · ax.py (Accessibility) · keys.py · apps.py
   providers/        claude_code.py (subscription via the CLI) · anthropic_provider.py · openai_compat.py · mlx_local.py (local models) · jev.py
-  evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis
+  evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis · intake.py (the front-desk check)
   replay/           decision recording, dataset builder, meaning-based grader, curated hard items, runner
   tune/             calibrate (probes, effort sweep) · ablate (replay bisection, trace audit) · mine · propose · accept
 profiles/           calibrated profiles written by `pilot tune`, and ledger.jsonl (every experiment and verdict)
@@ -571,6 +643,12 @@ tests/              offline tests: fake Mac, scripted models, fake CLI (`uv run 
 ## 12. Known limits
 
 * **The Return key isn't guarded like a Send button.** A risky click is refused, but pressing Return in a text box is allowed, so a message can still go out. In the sealed suite this happened in 4 of 10 first attempts of `chat-2fa`, each time for a message the user had asked for ([results](#9-results)).
+* **Vague, big requests are checked at the front door only.** The asking, the route and the hand-over of answers are tested (below), and one such job ran end to end without the screen. No flight has been searched and no job applied for: those need your signed-in browser, minutes of work across real sites, and a person answering, and none of that has been run yet. Expect the first real attempts to fail in new ways.
+* **Installing still needs a terminal once.** `pilot app --install` makes the app from a checkout; there is no download-and-drag installer yet. Because the checkout sits in Documents, macOS asks a third question on first launch (access to the Documents folder) before the window can appear.
+* **Real use from the window is three runs old.** One finished and was rated up (below), one was stopped by the user, one ended at the Claude plan's usage limit after 104 seconds. Pilot and any Claude Code session on the same account draw on the same plan limit. Twice during earlier tests a run stopped at once with "the Mac is locked" while a check a moment later said it was not; the cause was not found (the Mac may have been waking from its lock screen).
+* **A follow-up such as "continue" starts a new task.** It sees the earlier task as session context, but the stopped task's progress is not carried over, and its permissions (the verbs and places the first request named) are not.
+* **Places named in plain words don't widen the scope.** "Downloads" in an answer is not `~/Downloads` to the guard, so each `mv` there asks first. Whether plain folder names should count is a policy decision.
+* **A purchase the request names is not asked about again.** "Buy me a ticket" authorises the final Pay button, as the sealed checkout task requires. With a person at the keyboard it may be better to always ask before money moves; that is also a policy decision.
 * One display (the main screen). Apps with little Accessibility information (games, canvases, some Electron/Java apps) fall back to pixel actions.
 * Calibrated values rest on small samples (a dozen decisions per effort, eight probe screens); larger runs need more quota.
 * Older traces lack element lists, so they replay screenshot-only; new runs record everything.
@@ -587,6 +665,10 @@ Install and permissions are in the [README](README.md#try-it). The full set of o
 pilot "task"                       # run once with the default profile for your credentials
 pilot --profile <name|path> "task" # run with a saved profile
 pilot --approve all "task"         # confirm every action
+pilot app                          # the Pilot window (--install: make Pilot.app; --browser: as a page, for development)
+pilot --no-ask "task"              # start at once: no questions or route up front
+pilot brief "task"                 # what Pilot would ask and its route; nothing is done
+pilot brief --check dev            # grade the front desk on labelled requests (sealed: the held-out prompts)
 pilot --gui-only "task"            # no shell or AppleScript
 pilot -v "task"                    # show every result and model latency
 pilot observe                      # print what the agent sees right now (no model calls)

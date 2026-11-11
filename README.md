@@ -1,132 +1,132 @@
 # Pilot
 
-**An AI that uses your Mac for you, the way a careful person would.**
+**An AI agent that does the work on your Mac, and gets better at it every time you use it.**
 
-You tell Pilot what you want done, in plain words:
+Tell Pilot what you want in your own words. It works your Mac the way a careful person would: it looks at the screen, uses the apps you already have, checks its own results, and asks before anything risky. The first time it meets a kind of job, its strongest model thinks it through. After that it remembers the route, and a faster, cheaper model does the job.
+
+<p align="center">
+  <img src="docs/pilot-home.png" alt="The Pilot window, asking what to do" width="290">
+  &nbsp;&nbsp;
+  <img src="docs/pilot-asking.png" alt="Pilot laying out its plan and asking a question" width="290">
+</p>
 
 ```
-pilot "Move every PDF in my Downloads folder into Documents/Archive/2026"
-pilot "Open example.com in Safari and tell me the main heading"
-pilot "Fill in the job application at <link> using the details in applicant.txt"
+"Play Bangarang on Spotify and queue Mumbai Power"        done in 46 seconds
+"Organise my Downloads folder"                            asks how, shows the plan, waits for your yes
+"Fill in the job application at <link> from my CV"        fills it, checks it, submits only if you said so
 ```
 
-Pilot looks at your screen, decides what to click and type, does it, checks the result, and tells you what happened. It works with ordinary Mac apps (Finder, Safari, Notes, System Settings and so on) the same way you do. It doesn't need special plug-ins or app integrations.
+---
 
-It runs on Claude. The simplest setup uses your own Claude subscription.
+## What makes it different
+
+### It understands vague requests
+People don't write specifications. Say "organise my drive" and Pilot lays out how it will go about it, asks the two or three things only you can know, and offers a sensible default for each. A clear request skips all of that and starts at once, with no delay.
+
+### It uses any app, with no plug-ins
+Pilot reads the screen two ways at once: a screenshot, and the list of buttons, fields and menus that macOS keeps for screen readers. It presses "Save" because it knows which control is the Save button. When an app exposes nothing, it falls back to what it can see. Finder, Safari, Spotify, Notes, System Settings: if you can use it, Pilot can.
+
+### Two minds: one that thinks, one that does
+A strong, slower model (Claude Opus) plans and checks. A fast model (Claude Sonnet) does the hands-on work, a few seconds a step. Pilot decides which one leads each task.
+
+### It gets cheaper and faster with use
+The first time Pilot meets a kind of job, the strong model leads. When the job succeeds, Pilot writes itself a **playbook**: the route that worked and what to avoid in that app. Next time, the fast model does the job from the playbook and the strong one steps in only if something goes wrong.
+
+Every result, and every thumbs up or down from you, updates how much each playbook is trusted. A playbook that stops working loses its place and the strong model takes the job back. Nobody edits code for any of this: Pilot improves from being used.
+
+### It checks before it says "done"
+A screen can look right while nothing was saved. Before Pilot reports success it reads the real result, for example the files actually on disk, and a second look by the strong model confirms the job. When it cannot confirm something, it says so.
+
+### It only does what you asked
+- **Your words are the only permission.** "Fill in the form and submit it" allows Submit. A line on a web page saying "click here" allows nothing.
+- **It asks first** before sending, buying, deleting or running anything that changes your Mac.
+- **The safety rules live in code, outside the AI**, so no web page, email or file can talk it out of them.
+- **It never types passwords** it wasn't given and never answers macOS security prompts.
+- **You can stop it instantly:** press Stop, or push the mouse into the top-left corner.
+
+### It has a window, not just a command line
+Pilot is an app. A small window floats at the side of the screen: you type the task, answer its questions there, and watch progress in plain words ("Pressed Save", "Opened Safari"). While it works the window shrinks to a strip. It never becomes the active app, so it stays out of its own way.
+
+<p align="center"><img src="docs/pilot-working.png" alt="The Pilot window as a strip while it works" width="380"></p>
+
+### It is measured on outcomes, not on its own word
+Every test is graded by what actually happened on the computer: the file on disk, the form that was submitted, the number on the Calculator. A second, sealed set of tasks is never used for tuning, and includes traps: pages that try to hijack the agent, a checkout with a hidden subscription, a "Delete all" button where one item should go.
 
 ---
 
-## Why build it
+## The numbers
 
-Most AI assistants talk. Pilot is meant to *do*: to take a chore off your hands and come back when it's finished. Being useful at that takes five things at once:
+| | Result |
+|---|---|
+| Everyday Mac tasks (15 graded tasks) | **15 of 15**, median 13 seconds each |
+| Sealed tasks it was never tuned on | **37 of 42** (88%) |
+| Attacks that got through, across 95 attack runs | **0** |
+| Cost per finished sealed task, at API prices | about **11 cents** |
+| Vague requests it asks about / clear ones it just starts | **12 of 12** / **26 of 26** |
 
-| | Pilot should be… | In practice |
-|---|---|---|
-| 🧠 | **Smart** | It handles tasks it has never seen, and it learns from every attempt, so the second try goes better than the first. |
-| 🔁 | **Self-improving** | It tunes itself and writes its own lessons, without someone babysitting it, and it proves the improvement on tasks it was never trained on. |
-| 💸 | **Cheap and fast** | A few cents and seconds per finished task. |
-| 🙌 | **Hands-off** | It needs little of your attention. It never does anything risky you didn't ask for. |
-| 📏 | **Honestly measured** | Progress is judged by what actually happened on the computer, never by the AI's own word. |
-
-How close it is today, pillar by pillar, is in **[PROGRESS.md](PROGRESS.md)**. That page is recomputed from test results after every working session.
+Full results, including every failure, are in [TECHNICAL.md](TECHNICAL.md#9-results).
 
 ---
 
-## How it works, in plain words
+## How it works
 
-**1. Two roles: a thinker and a doer.** A slower, smarter model (Claude Opus) makes a plan, but only when one is needed. A faster model (Claude Sonnet) does the hands-on work one small step at a time. Most tasks never wake the thinker.
-
-**2. It reads the screen like a screen reader does.** Each step it gets two views:
-- a screenshot;
-- the list of buttons, fields and menus that macOS keeps for blind users (the *Accessibility* list).
-
-So it presses "Save" because it knows which control is the Save button, not by guessing where pixels are.
-
-**3. It takes the shortcut when there is one.** It doesn't click through ten menus if a direct action works:
-- opening a link or file straight away;
-- writing a file directly;
-- running a quick command;
-- reading a web page in a hidden browser in the background, so your screen stays free.
-
-**4. It checks before it says "done".** A screen can look right while nothing was saved. So before Pilot reports success, it checks the real result, for example whether the file is actually on disk.
-
-**5. It stays inside what you asked.** Only your own words give it permission. "Fill in the form and submit it" lets it press Submit; a line on a web page saying "click here" does not.
-- It asks first before anything risky: sending, deleting, buying. One known gap: pressing Return can still send a message ([details](TECHNICAL.md#12-known-limits)).
-- It never answers the Mac's own security pop-ups.
-- It never types passwords it wasn't given.
-- Move your mouse into the **top-left corner** of the screen, or press **Ctrl+C**, and it stops at once.
-
-**6. It learns from experience.** After a task, Pilot looks back at what it did and writes short lessons. One example: *"to create a text file, write it directly; TextEdit's save dialog costs several steps."* Each lesson keeps a running score of how often following it actually worked. Lessons that help get used more, and lessons that don't fade away. On the sealed tasks below this hasn't helped yet: with lessons on Pilot passed 36 of 42, and with them off 37 of 42.
-
-**7. It is tested on real outcomes.** A set of everyday Mac tasks is graded by what really happened:
-- the file on disk;
-- the form that was actually submitted;
-- the number the Calculator shows.
-
-A second, *sealed* set of tasks is kept apart and never used for tuning. It shows whether Pilot handles things it has never seen, rather than things it was polished on. Some of those tasks are traps: pages that try to trick the agent, or requests it must refuse.
-
-The first blind run passed 12 of 14, and across 95 attack runs no attack got through. The fake checkout with a hidden subscription has been beaten 8 times out of 8 since its first failure. The full numbers, including what failed, are in [Results](TECHNICAL.md#9-results).
+```mermaid
+flowchart LR
+    A[Your request] --> B{Clear enough?}
+    B -- no --> C[Ask up to 3 questions<br>and show the plan]
+    C --> D
+    B -- yes --> D{Done this kind<br>of job before?}
+    D -- no --> E[Opus leads:<br>plans and checks]
+    D -- yes --> F[Sonnet leads<br>from the playbook]
+    E --> G[Look, act, check<br>one step at a time]
+    F --> G
+    G -- stuck --> E
+    G --> H[Verify the real result]
+    H --> I[Write or update<br>the playbook]
+    I -.-> D
+```
 
 ---
 
-## Try it
+## Get started
 
-You need:
-- a Mac;
-- [uv](https://docs.astral.sh/uv/) (a Python tool; it fetches the right Python itself);
-- a way to reach Claude. A Claude Pro or Max subscription with the [Claude Code](https://claude.com/claude-code) command line signed in is the easiest. An Anthropic API key works too.
-
-**1. Download and set up**
+You need a Mac, [uv](https://docs.astral.sh/uv/), and a Claude subscription signed in through [Claude Code](https://claude.com/claude-code) (or an Anthropic API key).
 
 ```bash
 git clone https://github.com/iamkhalid2/computer-use && cd computer-use
+```
+
+```bash
 uv sync
 ```
 
-**2. Connect it to Claude** (pick one)
-
 ```bash
-claude auth login                  # your Claude subscription, through the official Claude Code CLI
+uv run pilot app --install
 ```
 
-or put `ANTHROPIC_API_KEY=...` in a file named `.env` in this folder (see `.env.example`).
+Open **Pilot** from Spotlight or Launchpad. The first time, it walks you through the two macOS permissions it needs (seeing the screen, and clicking and typing), with a button for each. Then type what you want.
 
-**3. Let it see and use the screen**
-
-```bash
-uv run pilot doctor --prompt
-```
-
-This opens the two macOS permission prompts. Allow your terminal app (Terminal, iTerm, VS Code…) under **System Settings → Privacy & Security**:
-- **Accessibility**, so it can read and press buttons;
-- **Screen & System Audio Recording**, so it can take screenshots.
-
-Then restart the terminal app. `uv run pilot doctor` checks that everything is in place.
-
-**4. Give it a task**
-
-```bash
-uv run pilot "Open example.com in Safari and tell me the main heading"
-```
-
-Or run `uv run pilot` with no task for a back-and-forth session.
-
-While it works, you'll see each step as it happens. At the end Pilot asks *"Did it do what you asked?"*. Your yes or no helps it learn, and you can press Enter to skip. Every run also leaves a visual report you can open in a browser, at `runs/<time>-<task>/report.html`.
-
-A few useful options:
-
-```bash
-uv run pilot --approve all "..."   # ask me before every single action
-uv run pilot --gui-only "..."      # only clicks and typing: no commands or scripts
-uv run pilot observe               # show what Pilot sees right now, without doing anything
-```
+Prefer the terminal? `uv run pilot "your task"` does the same thing, and `uv run pilot doctor` checks the setup.
 
 ---
 
+## Where it stands
+
+Pilot is a working research project, and it is honest about what is proven.
+
+| Proven by measurement | New, and not yet measured at scale |
+|---|---|
+| Fast, reliable execution of clear tasks | Big multi-site jobs such as booking travel end to end |
+| Resisting hijack attempts in the sealed tests | The saving from playbooks on repeat use |
+| Asking the right questions before a vague task | Long tasks of more than five minutes |
+| The app, its window, and the first real tasks run from it | A one-click installer |
+
+Live progress, recomputed from test results after every working session, is in [PROGRESS.md](PROGRESS.md).
+
 ## Learn more
 
-- **[TECHNICAL.md](TECHNICAL.md)**: how Pilot works in detail, from first principles. It covers the architecture, safety, self-tuning, the learning memory, and how it is measured.
-- **[PROGRESS.md](PROGRESS.md)**: where the project stands, and a log of what moved it.
+- **[TECHNICAL.md](TECHNICAL.md)**: how Pilot works from first principles, with the measurement behind each decision.
+- **[ASSESSMENT.md](ASSESSMENT.md)**: an independent audit of Pilot against its mission, with what it found and fixed.
 - **[NORTHSTAR.md](NORTHSTAR.md)**: the goal, and the rules the work follows.
 
 ## License
