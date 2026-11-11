@@ -2,6 +2,8 @@
 
     pilot "open example.com in Safari and tell me the heading"
     pilot                       interactive session
+    pilot app                   the Pilot window: type a task, answer its questions, watch it work (--install: make Pilot.app)
+    pilot brief "organise my drive"   what Pilot would ask and how it would go about it (no screen, nothing is done)
     pilot doctor                permissions, credentials, speed check
     pilot observe               what the agent sees right now (no model calls)
     pilot eval                  graded task suite; compare presets
@@ -21,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune", "feedback", "learn"}
+SUBCOMMANDS = {"doctor", "observe", "eval", "presets", "models", "replay", "profile", "tune", "feedback", "learn", "brief", "app"}
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -41,12 +43,14 @@ def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-cost", type=float)
     p.add_argument("--max-turns", type=int)
     p.add_argument("--speak", action="store_true", default=None, help="say the result aloud")
+    p.add_argument("--no-ask", dest="intake", action="store_false", default=None,
+                   help="start at once: no questions or route up front, even for a vague request")
 
 
 def _settings(args: argparse.Namespace, **extra):
     from .config import build_settings
 
-    keys = ["approve", "gui_only", "use_ax", "jev", "verify", "plan", "max_minutes", "max_cost", "max_turns", "speak"]
+    keys = ["approve", "gui_only", "use_ax", "jev", "verify", "plan", "max_minutes", "max_cost", "max_turns", "speak", "intake"]
     return build_settings(
         preset=args.preset, planner=args.planner, executor=args.executor,
         planner_effort=args.planner_effort, executor_effort=args.executor_effort, profile=getattr(args, "profile", None),
@@ -68,6 +72,7 @@ def cmd_task(argv: list[str]) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("--no-feedback", action="store_true", help="don't ask for a thumbs up or down after each task")
+    p.add_argument("--no-learn", action="store_true", help="no playbooks: don't read or write what Pilot learned from earlier jobs")
     _common(p)
     args = p.parse_args(argv)
     from . import feedback
@@ -76,7 +81,8 @@ def cmd_task(argv: list[str]) -> int:
     from .env import MacEnv
     from .providers.jev import Jev
 
-    settings = _settings(args)
+    # Questions and approvals need a person at the keyboard; piped or scheduled, Pilot works with what it was given.
+    settings = _settings(args, interactive=sys.stdin.isatty(), playbooks="off" if args.no_learn else "learn")
     reporter = Reporter(verbose=args.verbose, quiet=args.quiet)
     env = MacEnv(settings.profile.max_long_edge, settings.profile.image_format, settings.profile.use_ax)
     _permission_hint(env, reporter)
@@ -85,7 +91,9 @@ def cmd_task(argv: list[str]) -> int:
 
     def rate(out) -> None:
         if not (args.no_feedback or args.quiet) and sys.stdin.isatty() and out.report:
-            feedback.ask(Path(out.report).parent, out.success, reporter.c.input)
+            fb = feedback.ask(Path(out.report).parent, out.success, reporter.c.input)
+            if fb and agent.skills is not None and agent.skills.mode == "learn":
+                agent.skills.rate(fb["rating"] == feedback.UP)
 
     if args.task:
         with KeepAwake():
@@ -213,6 +221,8 @@ def cmd_eval(argv: list[str]) -> int:
     p.add_argument("--suite", default="bench", choices=["bench", "holdout"], help="holdout: the sealed suite nothing was tuned on")
     p.add_argument("--freeze", action="store_true", help="with --validate --suite holdout: record the suite's hash once every grader is valid")
     p.add_argument("--retry", action="store_true", help="after a failed run, reflect on it and try the task once more (second-attempt test)")
+    p.add_argument("--playbooks", action="store_true", help="bench only: start with no playbooks and learn as it goes; with --repeat 3, "
+                   "run 1 is cold and runs 2-3 show what repeat use saves (`pilot learn curve <results>`)")
     _common(p)
     args = p.parse_args(argv)
     from .config import default_preset
@@ -241,6 +251,8 @@ def cmd_eval(argv: list[str]) -> int:
     overrides = {k: getattr(args, k) for k in ["approve", "use_ax", "jev", "verify", "plan", "max_minutes", "max_cost", "max_turns"] if getattr(args, k) is not None}
     if args.planner or args.executor:
         overrides.update(planner=args.planner, executor=args.executor)
+    if args.playbooks and args.suite == "bench":
+        overrides["playbooks"] = "learn"
     out = Path(args.out) / "holdout" if args.suite == "holdout" else Path(args.out)
     run_evals(presets, task_ids, args.repeat, overrides, out, tags, args.suite, retry=args.retry)
     return 0
@@ -498,8 +510,9 @@ def cmd_tune(argv: list[str]) -> int:
 
 def cmd_learn(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="pilot learn", description="Experience: lessons Pilot learned from its own runs, with a belief in each")
-    p.add_argument("action", choices=["seed", "show", "report"])
-    p.add_argument("results", nargs="?", help="report: an eval results file (evals/holdout/holdout-*.json)")
+    p.add_argument("action", choices=["seed", "show", "report", "playbooks", "curve", "distil"])
+    p.add_argument("results", nargs="?", help="report, curve: an eval results file (evals/holdout/holdout-*.json, evals/pilotbench-*.json) · "
+                   "distil: a finished run's folder (runs/<time>-<task>)")
     p.add_argument("--on", default="sub-learn", help="report: the profile with lessons on")
     p.add_argument("--off", default="sub", help="report: the profile with lessons off")
     p.add_argument("--per-task", type=int, default=2, help="seed: recorded runs reflected on per bench task (a failure first)")
@@ -507,6 +520,40 @@ def cmd_learn(argv: list[str]) -> int:
     args = p.parse_args(argv)
     from . import experience as X
 
+    if args.action == "playbooks":
+        from . import skills as S
+
+        store = S.Skills(mode="use")
+        print(S.describe(store))
+        print(f"{len(store.books)} playbooks in {store.path}")
+        return 0
+    if args.action == "distil":
+        # Learn from a run that finished before playbooks were on. Only a run that succeeded, and that you did not rate down.
+        from . import feedback
+        from . import skills as S
+        from .providers import get_provider
+
+        run = Path(args.results or "")
+        summary = json.loads((run / "summary.json").read_text()) if (run / "summary.json").exists() else None
+        fb = feedback.read(run) if summary else None
+        if not summary or not summary.get("success") or (fb and fb["rating"] == feedback.DOWN):
+            sys.exit("distil needs the folder of a run that succeeded and was not rated down")
+        store = S.Skills(mode="learn")
+        stats = {"seconds": summary["seconds"], "calls": summary["model_calls"], "planner": (summary.get("by_role") or {}).get("planner", {}).get("calls", 0)}
+        entry = store.after(get_provider(_settings(args).executor), run, True, X.GRADED if fb else X.SELF, None, stats)
+        for pid in entry["wrote"]:
+            print(store.books[pid].text())
+        print(f"{len(entry['wrote'])} playbook(s) written to {store.path}" + (f" ({entry['error']})" if entry.get("error") else ""))
+        return 0
+    if args.action == "curve":
+        from . import skills as S
+
+        if not args.results:
+            sys.exit("curve needs an eval results file run with --playbooks --repeat 3")
+        for row in S.curve(json.loads(Path(args.results).read_text())):
+            print(f"run {row['run']}: passed {row['passed']}/{row['tasks']} · executor led {row['executor_led']}/{row['tasks']} · median {row['median_s']}s · "
+                  f"{row['model_calls']} model calls ({row['planner_calls']} planner) · ${row['cost']} · {row['tokens_in']} tokens in")
+        return 0
     exp = X.Experience(mode="learn")
     if args.action == "show":
         for les in sorted(exp.lessons.values(), key=lambda x: (-x.mean, -x.evidence)):
@@ -564,6 +611,62 @@ def cmd_learn(argv: list[str]) -> int:
     return 0
 
 
+def cmd_brief(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="pilot brief", description="The front desk on its own: what Pilot would ask, and its route. Nothing is done.")
+    p.add_argument("task", nargs="*", help="a request, in your own words")
+    p.add_argument("--check", choices=["dev", "sealed"], help="grade the front desk on labelled requests (sealed: the held-out prompts, the final check)")
+    p.add_argument("--parallel", type=int, default=3)
+    p.add_argument("--out", default="evals/intake")
+    _common(p)
+    args = p.parse_args(argv)
+    from . import intake
+    from .providers import get_provider
+
+    settings = _settings(args)
+    prov = get_provider(settings.executor)
+    if args.check:
+        from .evals import intake as check
+
+        rep = check.check(prov, args.check, args.parallel)
+        for r in rep["rows"]:
+            mark = "ERR " if r["pass"] is None else ("PASS" if r["pass"] else "FAIL")
+            print(f"{mark} {r['expect']:5} {r.get('seconds', 0):5.1f}s  {r['task'][:78]}" + (f"  · {r['why']}" if r["why"] else ""))
+        a, s = rep["asked_when_needed"], rep["started_when_clear"]
+        print(f"asked when needed {a[0]}/{a[1]} · started when clear {s[0]}/{s[1]} · small tasks given a route {rep['routed_small_task']} · "
+              f"median {rep['median_s']}s, slowest {rep['max_s']}s · errors {rep['errors']}")
+        print(f"Results: {check.save(rep, settings.executor.label, Path(args.out))}")
+        return 0 if a[0] == a[1] and s[0] == s[1] and not rep["errors"] else 1
+    if not args.task:
+        sys.exit('usage: pilot brief "what you want done"')
+    brief, _ = intake.assess(prov, " ".join(args.task))
+    print(f"{brief.goal}  ({brief.seconds:.1f}s)")
+    if brief.ready and not brief.route:
+        print("Clear enough: Pilot would start at once.")
+    for q, default in brief.questions:
+        print(f"  ? {q}" + (f"  [Enter = {default}]" if default else ""))
+    for i, s in enumerate(brief.route, 1):
+        print(f"  {i}. {s}")
+    return 0
+
+
+def cmd_app(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="pilot app", description="The Pilot window, for using Pilot without the command line")
+    p.add_argument("--install", action="store_true", help="make a double-clickable Pilot.app (in ~/Applications unless --dest)")
+    p.add_argument("--dest", default=None, help="with --install: the folder to put Pilot.app in")
+    p.add_argument("--browser", action="store_true", help="show the window as a page in your browser instead (for development)")
+    p.add_argument("--port", type=int, default=0)
+    args = p.parse_args(argv)
+    if args.install:
+        from .ui.bundle import build
+
+        app = build(Path(args.dest).expanduser() if args.dest else None)
+        print(f"Made {app}\nOpen it like any app (double-click, Spotlight or Launchpad). The first time, it walks you through two macOS permissions.")
+        return 0
+    from .ui.app import main as run
+
+    return run(browser=args.browser, port=args.port)
+
+
 def cmd_presets(argv: list[str]) -> int:
     from .config import PRESETS, default_preset, has_credentials
 
@@ -600,7 +703,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in SUBCOMMANDS:
         name = argv.pop(0)
         return {"doctor": cmd_doctor, "observe": cmd_observe, "eval": cmd_eval, "presets": cmd_presets, "models": cmd_models,
-                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune, "feedback": cmd_feedback, "learn": cmd_learn}[name](argv)
+                "replay": cmd_replay, "profile": cmd_profile, "tune": cmd_tune, "feedback": cmd_feedback, "learn": cmd_learn,
+                "brief": cmd_brief, "app": cmd_app}[name](argv)
     return cmd_task(argv)
 
 

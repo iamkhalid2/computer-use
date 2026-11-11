@@ -17,6 +17,7 @@ from typing import Any, Callable
 from . import outline as ol
 from .config import Settings
 from .env import MacEnv
+from .intake import NO_ANSWER
 from .mac import apps
 from .mac.ax import Node
 from .providers.jev import Jev
@@ -36,6 +37,10 @@ MUTATING = {
 }
 OFFSCREEN = {"web"}  # mutating, but never changes the screen: no screenshot follows a turn of only these
 CONTROL = {"done", "escalate"}
+# An app that shows the accessibility tree this few elements (Spotify and other web-view apps show about three) can only
+# be read from the screenshot: waiting on its tree for text or for an editable field is time spent on something that cannot happen.
+BLIND_ELEMENTS = 8
+BLIND_AFTER = 1.5  # seconds a text wait gives a sparse app to fill its tree in (an app that is still launching) before giving up
 WEB_ACTIONS = ["goto", "snapshot", "click", "fill", "select", "press", "type", "scroll", "drag", "back", "screenshot", "dialog"]
 # Web roles as the label classifier knows them: buttons, links, menu items and unnamed clickables can
 # trigger a risky-click confirmation; form fields and plain content cannot.
@@ -314,6 +319,11 @@ class Toolbox:
         timeout = prof.editable_timeout if timeout is None else timeout
         if not self.env.use_ax:
             time.sleep(min(0.15, timeout))
+            return
+        snap = self.env.last_snapshot
+        if snap is not None and not snap.error and len(snap.nodes) <= BLIND_ELEMENTS and snap.pid == self.env.frontmost()[0]:
+            time.sleep(min(0.15, timeout))  # the app shows no fields to wait for: a short settle, as without accessibility
+            self.events.append({"name": "await_editable", "waited": 0.15, "found": False, "blind": True})
             return
         t0 = time.monotonic()
         deadline = t0 + timeout
@@ -808,12 +818,18 @@ class Toolbox:
             if ok and text and self.env.use_ax:
                 q = ol.norm(text)
                 found = False
+                seen = 0
                 for root in self.env.ax.search_roots(pid)[:3]:
                     nodes, _ = self.env.ax.walk(root, (g.points_w, g.points_h), max_nodes=2500, time_budget=0.8)
+                    seen += len(nodes)
                     if any(q in ol.norm(n.label) or (n.value and q in ol.norm(n.value)) for n in nodes):
                         found = True
                         break
                 ok = found != gone
+                if not found and not gone and seen <= BLIND_ELEMENTS and time.monotonic() - t0 >= BLIND_AFTER:
+                    self.events.append({"name": "wait_for_blind", "app": name, "elements": seen})
+                    return ToolResult(call.id, False, f"{name} shows no readable text here ({seen} accessible elements), so wait_for cannot see "
+                                      f"{text!r}. In this app use a short `computer` wait instead and read the next screenshot.")
             if ok:
                 return ToolResult(call.id, True, f"Condition met after {time.monotonic() - t0:.1f}s.")
             time.sleep(0.25)
@@ -886,7 +902,7 @@ class Toolbox:
         q = call.args.get("question", "")
         if not self.ask:
             return ToolResult(call.id, False, "No user is available. Use your best judgment, or finish with success=false.")
-        return ToolResult(call.id, True, f"User says: {self.ask(q)}")
+        return ToolResult(call.id, True, f"User says: {self.ask(q) or NO_ANSWER}")
 
     def t_done(self, call: ToolCall) -> ToolResult:
         # An unstated outcome must never count as success (a summary saying "impossible"

@@ -73,6 +73,23 @@ EXECUTABLE_SUFFIXES = {".app", ".command", ".sh", ".tool", ".terminal", ".pkg", 
 VIEW_SCHEMES = {"http", "https", "mailto", "x-apple.systempreferences"}
 APP_DIRS = ("/Applications/", "/System/Applications/", "/System/Library/CoreServices/", os.path.expanduser("~/Applications/"))
 BULK = re.compile(r"\b(all|every|everything|entire)\b", re.I)
+# "fill it in but don't submit it" names the verb to forbid it. A verb counts as asked for only where the words
+# before it in the same clause do not negate it; when in doubt the button just asks first.
+NEGATION = re.compile(r"(\bnot\b|n['’]t\b|\bdont\b|\bnever\b|\bwithout\b|\bno\b|\binstead of\b|\brather than\b|\bavoid\b|\bbefore you\b)", re.I)
+CLAUSE_END = re.compile(r"[.;!?,\n]|\bbut\b|\bthen\b")
+
+
+def asked_verbs(low: str) -> set[str]:
+    """The risky verbs the request asks for: mentioned, and not only in order to rule them out."""
+    out = set()
+    for v in SCOPE_VERBS:
+        for m in re.finditer(rf"\b{re.escape(v)}\b", low):
+            lead = low[max(0, m.start() - 48):m.start()]
+            clause = CLAUSE_END.split(lead)[-1]
+            if not NEGATION.search(clause):
+                out.add(v)
+                break
+    return out
 CURL_WRITE_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file",
                     "-X", "--request", "-o", "--output", "-O", "--remote-name", "-K", "--config"}
 
@@ -100,8 +117,14 @@ class TaskScope:
             roots.append(path.parent if path.suffix and not path.is_dir() else path)
         roots += [Path(os.path.expanduser(r)).resolve() for r in (extra_roots or [])]
         low = task.lower()
-        verbs = {v for v in SCOPE_VERBS if re.search(rf"\b{re.escape(v)}\b", low)}
-        return cls(origins, roots, verbs, bool(BULK.search(low)), low)
+        return cls(origins, roots, asked_verbs(low), bool(BULK.search(low)), low)
+
+    def add_places(self, text: str) -> None:
+        """Widen where Pilot may work with the folders and sites in something the user typed when asked.
+        Places only: an answer never adds a verb, so nothing said in passing can authorise a send, a purchase or a delete."""
+        more = TaskScope.from_task(text)
+        self.origins |= more.origins
+        self.roots += [r for r in more.roots if r not in self.roots]
 
     def allows_url(self, url: str) -> bool:
         u = urlparse(url)
@@ -148,6 +171,44 @@ class TaskScope:
         return len(ps) >= 2 and ps[0] == str(os.getuid()) and any(self.names(w) for w in ps[1:])
 
 
+def split_commands(line: str) -> list[str] | None:
+    """The separate commands in a shell line: split at ; | & && || and at line breaks, but only outside quotes.
+    None when a quote never closes.
+
+    A line break starts a new command exactly as `;` does, so each line is judged on its own (`ls` on line one
+    must not vouch for `rm` on line two). An operator inside quotes is just text (`stat -f "%Sm|%N"`)."""
+    out: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < len(line):
+                i += 1
+                cur.append(line[i])
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < len(line):
+            i += 1
+            cur += [" "] if line[i] == "\n" else [ch, line[i]]  # a backslash at a line's end joins the lines
+        elif ch in "'\"":
+            quote = ch
+            cur.append(ch)
+        elif ch in ";|&\n":
+            out.append("".join(cur))
+            cur = []
+            if ch in "|&" and line[i + 1:i + 2] == ch:
+                i += 1
+        else:
+            cur.append(ch)
+        i += 1
+    if quote:
+        return None
+    return out + ["".join(cur)]
+
+
 def classify_shell(command: str, scope: TaskScope | None = None) -> Verdict:
     for pat in BLOCK_SHELL:
         if re.search(pat, command, re.I):
@@ -159,7 +220,10 @@ def classify_shell(command: str, scope: TaskScope | None = None) -> Verdict:
     if re.search(r"`|\$\(|\$\{|>|<\(", stripped):
         return Verdict("confirm", "shell substitution or redirection")
     cwd: str | None = None
-    for segment in re.split(r"\|\||&&|;|\||&", stripped):
+    segments = split_commands(stripped)
+    if segments is None:
+        return Verdict("confirm", "unparseable shell command")
+    for segment in segments:
         v, cwd = _segment_verdict(segment, scope, cwd)
         if v.level != "ok":
             return v

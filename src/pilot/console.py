@@ -75,5 +75,29 @@ class Reporter:
     def confirm(self, prompt: str) -> bool:
         return Confirm.ask(f"[bold yellow]Allow?[/] {prompt}", default=False, console=self.c)
 
-    def ask(self, question: str) -> str:
-        return Prompt.ask(f"[bold cyan]Pilot asks:[/] {question}", console=self.c)
+    def ask(self, question: str, default: str = "") -> str:
+        """A question for the user. With a default, Enter accepts it; without one, Enter means "you decide"."""
+        return Prompt.ask(f"[bold cyan]Pilot asks:[/] {question}", console=self.c, default=default or "", show_default=bool(default))
+
+    def route(self, goal: str, steps: list[str]) -> None:
+        """What Pilot understood and how it will go about it, before any question. Shown even when quiet: questions follow."""
+        if goal:
+            self.c.print(f"[magenta]◆ Got it:[/] {goal}")
+        for i, s in enumerate(steps, 1):
+            self.c.print(f"   {i}. {s}")
+        if steps:
+            self.c.print("[dim]   I'll check with you before anything is paid for, sent or deleted.[/]")
+
+    def lead(self, why: dict[str, Any]) -> None:
+        """Who leads this task and why: the planner on a new kind of job, the executor on one it has a playbook for."""
+        if self.quiet:
+            return
+        if why.get("lead") == "executor":
+            self.c.print(f"[magenta]◆ Done this before[/] [dim](playbook {why.get('playbook')}, worked {why.get('belief', 0):.0%} of the time): taking the quick route[/]")
+        else:
+            self.c.print(f"[magenta]◆ Thinking it through first[/] [dim]({why.get('why')}): slower this time, quicker the next[/]")
+
+    def keep_going(self, what: str, progress: str = "") -> bool:
+        if progress:
+            self.c.print(f"[dim]{progress}[/]")
+        return Confirm.ask(f"[bold yellow]Not finished:[/] {what}. Keep going?", default=True, console=self.c)

@@ -14,6 +14,7 @@ dependencies = [
     "pyobjc-framework-Cocoa>=11.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=11.0; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices>=11.0; sys_platform == 'darwin'",
+    "pyobjc-framework-WebKit>=11.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

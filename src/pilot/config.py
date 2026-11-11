@@ -154,6 +154,13 @@ class Settings:
     write_roots: list[str] = field(default_factory=lambda: [r for r in os.environ.get("PILOT_WRITE_ROOTS", "").split(":") if r])
     speak: bool = False
     interactive: bool = True
+    # The front desk: before a vague or big request, ask what only the user knows and lay out the route.
+    # Only ever with a user present (interactive); `--no-ask` turns it off.
+    intake: bool = True
+    # Playbooks: a new kind of job is led by the planner, its route is distilled, and the same kind is then led by the
+    # executor (skills.py). off | use (read only) | learn. Off unless a caller turns it on: everyday runs (the window,
+    # `pilot "task"`) learn; evals choose per arm, and the sealed suite never reads or writes one.
+    playbooks: str = "off"
     runs_dir: Path = field(default_factory=lambda: Path(os.environ.get("PILOT_RUNS", "runs")))
 
     def with_(self, **kw) -> "Settings":
@@ -258,7 +265,11 @@ def build_settings(
         name = preset or os.environ.get("PILOT_PRESET") or default_preset()
         if name not in PRESETS:
             raise ValueError(f"unknown preset {name!r} (choose from {', '.join(PRESETS)})")
-        prof, label = preset_profile(name), name
+        # A preset that has been tuned ships as a profile of the same name (profiles/sub.json). Plain `pilot "task"`,
+        # the window and the eval arm called "sub" must all run that, not the bare defaults: until Nov 2026 only
+        # `--profile sub` did, so the one adopted tuning change (context_budget) was off in everyday use.
+        tuned = Path(__file__).parent / "profiles" / f"{name}.json"
+        prof, label = (Profile.load(tuned) if tuned.exists() else preset_profile(name)), name
     changes: dict = {k: v for k, v in overrides.items() if k in KNOBS and v is not None}
     if planner:
         changes["planner"] = None if planner.lower() in {"none", "off", "-"} else planner

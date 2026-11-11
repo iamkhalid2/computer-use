@@ -119,6 +119,8 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{'holdout' if suite == 'holdout' else 'pilotbench'}-{datetime.now():%Y%m%d-%H%M%S}.json"
     streak = 0
+    skills: Any = None  # the playbook store of the arm being run (one per preset, empty at the start of this invocation)
+    stores: dict[str, Any] = {}
 
     def save(rows: list[dict[str, Any]]) -> None:  # after every run, so a crash keeps what was measured
         path.write_text(json.dumps(rows, indent=2))
@@ -145,7 +147,7 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
         time.sleep(0.4)
         body_dir = temp_dir()  # a fresh background-browser profile per run: no cookies carried between runs
         os.environ["PILOT_BODY_DIR"] = body_dir
-        agent = Agent(settings, env, Reporter(), Jev(), memory=memory, defer_learning=True)
+        agent = Agent(settings, env, Reporter(), Jev(), memory=memory, defer_learning=True, skills=skills)
         try:
             out = agent.run(task.render(ctx), context)
         finally:
@@ -167,6 +169,9 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
             "model_seconds": round(out.stats.model_seconds, 1), "actions": out.stats.actions,
             "escalations": out.stats.escalations, "cost": round(out.stats.cost, 4) if out.stats.cost_known else None,
             "tokens_in": int(sum(r.get("in", 0) for r in out.stats.by_role.values())),
+            "lead": ("executor" if agent.led is not None else "planner") if skills is not None else None,
+            "playbook": agent.led.id if agent.led is not None else None,
+            "planner_calls": int(out.stats.by_role.get("planner", {}).get("calls", 0)),
             "report": out.report,
         }
         rows.append(row)
@@ -182,6 +187,8 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
         c.print(f"[{'yellow' if invalid else 'green' if ok else 'red'}]{label}[/] {detail}" + (f" ({out.reason[:80]})" if invalid else ""))
         if memory is not None and memory.mode == "learn" and not invalid:
             agent.learn(Path(out.report).parent, ok, GRADED, feedback=detail)  # the grader's verdict is the evidence
+        if skills is not None and not invalid:
+            agent.learn_route(Path(out.report).parent, ok, GRADED)  # the verdict only: a playbook never sees the grader's detail
         return row, agent
 
     try:
@@ -198,6 +205,13 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
                     # Each entry is a preset name or a saved profile (name or path).
                     settings = build_settings(**({"preset": preset} if preset in PRESETS else {"profile": preset}), **kw)
                     memory = eval_memory(settings.profile.lessons, suite)
+                    skills = None
+                    if settings.playbooks != "off" and suite != "holdout":  # the sealed suite never reads or writes a playbook
+                        from ..skills import Skills
+
+                        if preset not in stores:
+                            stores[preset] = Skills(path.parent / f"{path.stem}-playbooks" / Path(preset).stem, settings.playbooks)
+                        skills = stores[preset]
                     c.rule(f"{preset} · {task.id} · run {n + 1}/{repeat}")
                     row, agent = attempt(preset, task, n, settings, memory)
                     if retry and agent is not None and not row["pass"] and not row["invalid"]:

@@ -259,3 +259,52 @@ def test_the_users_words_authorise_buying_killing_and_scoped_deletes():
     # Quitting through a GUI is judged like a kill, so a blocked `kill` has no unguarded detour.
     assert classify_label("Force Quit", "AXButton", kill).level == "ok"
     assert classify_label("Quit", "AXButton", logs).level == "confirm"
+
+
+def test_waits_give_up_fast_in_an_app_that_shows_no_accessibility_text(monkeypatch):
+    """Spotify shows the tree about three elements: a text wait there cost 5 s per try, and an editable-field wait 0.65 s."""
+    import time
+    from types import SimpleNamespace
+
+    from pilot import tools as tools_mod
+    from pilot.config import ModelSpec, Settings
+    from pilot.mac.ax import Snapshot
+    from pilot.safety import Policy
+    from pilot.types import ToolCall
+    from test_agent import FakeEnv
+
+    def node(label):
+        return SimpleNamespace(label=label, value=None)
+
+    env = FakeEnv(use_ax=True)
+    env.ax.search_roots = lambda pid: ["root"]
+    tb = tools_mod.Toolbox(env, Settings(planner=None, executor=ModelSpec("fake", "m"), interactive=False), Policy("none"), "pixels", None, None)
+
+    env.ax.walk = lambda root, size, max_nodes=0, time_budget=0: ([node("a"), node("b"), node("c")], False)
+    t = time.monotonic()
+    res = tb.execute(ToolCall("1", "wait_for", {"text": "Songs", "timeout": 8}))
+    assert not res.ok and "no readable text" in res.text and "3 accessible elements" in res.text
+    assert tools_mod.BLIND_AFTER <= time.monotonic() - t < 3.5 and tb.events[-1]["name"] == "wait_for_blind"
+
+    # an app with a real tree still gets its whole timeout
+    env.ax.walk = lambda root, size, max_nodes=0, time_budget=0: ([node(f"item {i}") for i in range(30)], False)
+    res = tb.execute(ToolCall("2", "wait_for", {"text": "Songs", "timeout": 2.2}))
+    assert not res.ok and res.text.startswith("Timed out after 2s")
+
+    # an app that is still launching: sparse at first, then the text arrives
+    started = time.monotonic()
+    env.ax.walk = lambda root, size, max_nodes=0, time_budget=0: (
+        [node("a")] if time.monotonic() - started < 0.6 else [node("Songs")] + [node(f"i{i}") for i in range(20)], False)
+    assert tb.execute(ToolCall("3", "wait_for", {"text": "Songs", "timeout": 8})).ok
+
+    # typing: no half-second wait for a field the app will never show
+    env.last_snapshot = Snapshot("Spotify", 2, None, "", [node("a"), node("b"), node("c")])
+    tb.events.clear()
+    t = time.monotonic()
+    tb._await_editable()
+    assert time.monotonic() - t < 0.4 and tb.events[-1] == {"name": "await_editable", "waited": 0.15, "found": False, "blind": True}
+    env.last_snapshot = Snapshot("TextEdit", 2, None, "", [node(f"i{i}") for i in range(30)])
+    env.ax.system, env.ax.attr = object(), lambda el, name: None  # nothing editable has focus yet
+    t = time.monotonic()
+    tb._await_editable()
+    assert time.monotonic() - t >= 0.55  # a normal app keeps the full wait

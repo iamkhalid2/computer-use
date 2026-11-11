@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pilot</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1c1b19; --soft: #6b6862; --faint: #a19d95; --line: #e4e1da;
+  --accent: #2d5bd7; --accent-ink: #ffffff; --ok: #1f8a4c; --bad: #c0392b; --warn-bg: #fff6e0; --warn-line: #ecd28a;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1b1b1a; --panel: #252523; --ink: #eeece7; --soft: #a5a199; --faint: #76726b; --line: #383734;
+          --accent: #7b9cf5; --accent-ink: #10131c; --ok: #58c686; --bad: #ef7d6f; --warn-bg: #352c14; --warn-line: #6b5720; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 13.5px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+       display: flex; flex-direction: column; -webkit-user-select: none; user-select: none; cursor: default; overflow: hidden; }
+header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+body[data-state="working"] header .dot { background: var(--accent); animation: pulse 1.3s ease-in-out infinite; }
+body[data-state="asking"] header .dot { background: #e0a100; }
+body[data-state="done"].ok header .dot { background: var(--ok); }
+body[data-state="done"].bad header .dot { background: var(--bad); }
+@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (prefers-reduced-motion: reduce) { header .dot { animation: none !important; } }
+header b { font-size: 14px; letter-spacing: .1px; }
+#status { color: var(--soft); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+button { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--faint); }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+main { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+section[hidden], [hidden] { display: none !important; }
+h1 { font-size: 19px; line-height: 1.25; margin: 6px 0 2px; font-weight: 650; letter-spacing: -.2px; }
+p { margin: 0; }
+.soft { color: var(--soft); }
+textarea, input[type=text] { width: 100%; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 11px; resize: none; -webkit-user-select: text; user-select: text; }
+textarea { min-height: 78px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row .grow { flex: 1; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { border-radius: 999px; padding: 4px 11px; color: var(--soft); font-size: 12.5px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+.card.ask { border-color: var(--warn-line); background: var(--warn-bg); }
+.card h2 { font-size: 13.5px; margin: 0; font-weight: 650; }
+.card.ask .q { font-size: 13.5px; font-weight: 600; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; -webkit-user-select: text; user-select: text; }
+.card details { font-size: 12px; color: var(--soft); }
+.card pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--soft);
+  max-height: 150px; overflow: auto; -webkit-user-select: text; user-select: text; }
+#task { font-weight: 600; -webkit-user-select: text; user-select: text; }
+#composer { display: flex; flex-direction: column; gap: 9px; }
+#composer .soft { font-size: 12px; }
+#route { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; counter-reset: s; }
+#route li { display: grid; grid-template-columns: 20px 1fr; gap: 6px; color: var(--soft); counter-increment: s; }
+#route li::before { content: counter(s); width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--line); font-size: 10.5px; display: grid; place-items: center; color: var(--faint); margin-top: 1px; }
+#route li.now { color: var(--ink); font-weight: 600; }
+#route li.now::before { border-color: var(--accent); color: var(--accent); }
+#route li.done::before { content: "✓"; background: var(--ok); border-color: var(--ok); color: #fff; }
+#feed { display: flex; flex-direction: column; gap: 3px; -webkit-user-select: text; user-select: text; }
+#feed .note { margin-top: 5px; }
+#feed .act { color: var(--soft); font-size: 12.5px; padding-left: 14px; position: relative; }
+#feed .act::before { content: "·"; position: absolute; left: 4px; }
+#feed .act.fail { color: var(--bad); }
+#feed .info { color: var(--faint); font-size: 12.5px; font-style: italic; }
+#feed .qa { margin-top: 5px; color: var(--soft); }
+#feed .qa b { color: var(--ink); font-weight: 600; }
+#feed details { font-size: 12px; color: var(--faint); padding-left: 14px; }
+#feed details pre { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; font: 11.5px ui-monospace, Menlo, monospace; }
+.result h2 { font-size: 15px; }
+.result.ok h2 { color: var(--ok); }
+.result.bad h2 { color: var(--bad); }
+.result .text { white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text; }
+.setup li { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+.setup ul { list-style: none; margin: 0; padding: 0; }
+.setup .mark { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--line); display: grid; place-items: center; font-size: 12px; }
+.setup li.yes .mark { background: var(--ok); border-color: var(--ok); color: #fff; }
+.setup small { display: block; color: var(--soft); }
+footer { flex: none; padding: 7px 14px 9px; color: var(--faint); font-size: 11.5px; border-top: 1px solid var(--line); text-align: center; }
+#now { display: none; }
+/* The window shrinks to a strip while Pilot works, so it covers as little of the screen as possible. */
+@media (max-height: 150px) {
+  main, footer { display: none; }
+  header { border-bottom: 0; flex-wrap: wrap; height: 100%; align-content: center; }
+  #now { display: block; width: 100%; color: var(--soft); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 17px; }
+}
+</style>
+</head>
+<body data-state="loading">
+<header>
+  <span class="dot" aria-hidden="true"></span><b>Pilot</b><span id="status" role="status" aria-live="polite">Starting…</span>
+  <button id="stop" class="danger" hidden>Stop</button>
+  <div id="now"></div>
+</header>
+<main id="main">
+  <section id="setup" class="card setup" hidden>
+    <h1>Two switches before we start</h1>
+    <p class="soft">Pilot works your Mac the way you would, so macOS asks you to allow it. You only do this once.</p>
+    <ul>
+      <li data-key="screen"><span class="mark"></span><div>See the screen<small>Turn on “Pilot” under Screen &amp; System Audio Recording.</small></div><button data-setup="screen">Open</button></li>
+      <li data-key="control"><span class="mark"></span><div>Click and type<small>Turn on “Pilot” under Accessibility.</small></div><button data-setup="control">Open</button></li>
+      <li data-key="model"><span class="mark"></span><div>Connect to Claude<small>Sign in with your Claude account.</small></div><button data-setup="model">Sign in</button></li>
+    </ul>
+    <p class="soft" id="setup-note">After switching both on, restart Pilot so macOS lets it in.</p>
+    <div class="row"><button id="recheck">Check again</button><span class="grow"></span><button id="restart" class="primary">Restart Pilot</button></div>
+  </section>
+
+  <section id="home" hidden>
+    <h1>What should I do?</h1>
+    <p class="soft">Say it in your own words. If I need to know something, I'll ask.</p>
+  </section>
+
+  <section id="run" hidden>
+    <div id="task"></div>
+    <div id="goal" class="soft" hidden></div>
+    <ol id="route" hidden></ol>
+    <div id="feed"></div>
+  </section>
+
+  <div id="card"></div>
+
+  <section id="composer" hidden>
+    <textarea id="box" placeholder="For example: organise my Downloads folder" aria-label="What should Pilot do?"></textarea>
+    <div class="row"><span class="soft grow">Return to start · Shift-Return for a new line</span><button id="go" class="primary">Start</button></div>
+    <div class="chips" id="chips"></div>
+  </section>
+</main>
+<footer id="foot">To stop at any moment, press Stop or push the mouse into the top-left corner.</footer>
+
+<script>
+"use strict";
+const TOKEN = "__PILOT_TOKEN__";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const S = { seq: 0, route: [], cur: 0, pending: null, ready: false, state: "loading" };
+
+async function api(path, body) {
+  const opt = { headers: { "X-Pilot-Token": TOKEN } };
+  if (body !== undefined) { opt.method = "POST"; opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+function setState(state, ok) {
+  S.state = state;
+  document.body.dataset.state = state;
+  document.body.classList.toggle("ok", ok === true);
+  document.body.classList.toggle("bad", ok === false);
+  $("stop").hidden = !(state === "working" || state === "asking");
+  $("foot").hidden = !(state === "working" || state === "asking");
+  const words = { idle: "Ready", working: "Working…", asking: "Needs you", done: ok === false ? "Not finished" : "Finished", setup: "Almost ready", loading: "Starting…" };
+  $("status").textContent = words[state] || "";
+}
+function now(text) { $("now").textContent = text; if (S.state === "working") $("status").textContent = text; }
+function scrollDown() { const m = $("main"); m.scrollTop = m.scrollHeight; }
+function show(id, on) { $(id).hidden = !on; }
+
+function drawRoute() {
+  const ol = $("route");
+  ol.replaceChildren(...S.route.map((g, i) => { const li = el("li", i + 1 < S.cur ? "done" : i + 1 === S.cur ? "now" : "", g); return li; }));
+  ol.hidden = S.route.length === 0;
+}
+function feed(cls, text) { const d = el("div", cls, text); $("feed").append(d); scrollDown(); return d; }
+function rich(text) {  // plain text with **bold**, nothing else: never HTML from the model or a page
+  const frag = document.createDocumentFragment();
+  String(text).split(/(\*\*[^*\n]+\*\*)/).forEach((part) => {
+    if (/^\*\*[^*\n]+\*\*$/.test(part)) frag.append(el("b", "", part.slice(2, -2))); else frag.append(part);
+  });
+  return frag;
+}
+function clearCard() { $("card").replaceChildren(); S.pending = null; }
+
+function askCard(ev) {
+  const card = el("div", "card ask");
+  card.append(el("div", "q", ev.question));
+  const input = el("input"); input.type = "text"; input.setAttribute("aria-label", ev.question);
+  input.placeholder = ev.default ? ev.default : "Type your answer";
+  const send = el("button", "primary", ev.default ? "Use this" : "Send");
+  const yesNo = !ev.default && /\b(shall i|should i|go ahead|ok to|is it ok|okay to|may i|can i|proceed|approve|your yes|confirm)\b/i.test(ev.question);
+  const skip = el("button", "", yesNo ? "No, stop" : "You decide");
+  const yes = el("button", "primary", "Yes, go ahead");
+  const sync = () => { send.textContent = input.value.trim() ? "Send" : (ev.default ? "Use this" : "Send"); send.disabled = !input.value.trim() && !ev.default; };
+  input.addEventListener("input", sync); sync();
+  const submit = (value) => { send.disabled = skip.disabled = yes.disabled = true; api("/api/answer", { id: ev.id, value }); };
+  send.onclick = () => submit(input.value.trim());
+  skip.onclick = () => submit(yesNo ? "No, don't do that. Stop here." : "");
+  yes.onclick = () => submit("Yes, go ahead");
+  if (yesNo) { input.placeholder = "Or tell me what to change"; send.className = ""; }
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !send.disabled) { e.preventDefault(); send.click(); } });
+  const row = el("div", "row"); row.append(el("span", "soft grow", ev.default ? "Press Return to accept." : ""), ev.default ? "" : skip, send, yesNo ? yes : "");
+  if (ev.default) { input.placeholder = "Or type something else"; const s = el("div", "soft"); s.append("My suggestion: ", el("b", "", ev.default)); card.append(s); }
+  card.append(input, row);
+  $("card").replaceChildren(card); S.pending = ev; input.focus(); scrollDown();
+}
+function yesNoCard(ev, title, body, yes, no) {
+  const card = el("div", "card ask");
+  card.append(el("h2", "", title));
+  if (body) card.append(el("div", "soft", body));
+  const y = el("button", "primary", yes), n = el("button", "", no);
+  const submit = (value) => { y.disabled = n.disabled = true; api("/api/answer", { id: ev.id, value }); };
+  y.onclick = () => submit(true); n.onclick = () => submit(false);
+  const row = el("div", "row"); row.append(el("span", "grow"), n, y); card.append(row);
+  $("card").replaceChildren(card); S.pending = ev; scrollDown();
+}
+function confirmCard(ev) {  // "shell: <command>  — <why>" and friends, said so a person can judge it
+  const [action, why] = String(ev.prompt).split(/\s+—\s+/, 2);
+  const m = /^(shell|run AppleScript)(?::\s*([\s\S]*))?$/.exec(action);
+  if (!m) { yesNoCard(ev, "May I " + action.replace(/^./, (c) => c.toLowerCase()) + "?", why ? "Why I'm asking: " + why + "." : "", "Allow", "Don't allow"); return; }
+  yesNoCard(ev, "May I run a command on your Mac?", "It isn't a plain look-up, so I'm asking first" + (why ? " (" + why.replace(/`/g, "") + ")." : "."), "Allow", "Don't allow");
+  if (m[2]) { const d = el("details"); d.append(el("summary", "", "Show the command"), el("pre", "", m[2])); $("card").firstChild.insertBefore(d, $("card").firstChild.lastChild); }
+}
+function resultCard(ev) {
+  const card = el("div", "card result " + (ev.success ? "ok" : "bad"));
+  card.append(el("h2", "", ev.success ? "Done" : (ev.stopped ? "Stopped" : "I couldn't finish this")));
+  const text = el("div", "text"); text.append(rich(ev.success ? (ev.answer || ev.summary || "") : (ev.reason || ev.summary || "")));
+  if (text.textContent) card.append(text);
+  if (ev.seconds) { const s = Math.round(ev.seconds); card.append(el("div", "soft", "Took " + (s >= 60 ? Math.floor(s / 60) + " min " + (s % 60) + " s" : s + " s") + (ev.actions ? " · " + ev.actions + " actions" : ""))); }
+  if (ev.report) {
+    const row = el("div", "row"); row.append(el("span", "soft grow", "Did it do what you asked?"));
+    const up = el("button", "", "Yes"), down = el("button", "", "No");
+    const rate = (rating) => { up.disabled = down.disabled = true; api("/api/rate", { rating, note: "" }); };
+    up.onclick = () => rate("up"); down.onclick = () => rate("down");
+    row.append(down, up); card.append(row); card.dataset.rating = "1";
+  }
+  $("card").replaceChildren(card); scrollDown();
+}
+
+function apply(ev) {
+  S.seq = Math.max(S.seq, ev.seq);
+  switch (ev.type) {
+    case "start":
+      S.route = []; S.cur = 0; S.ok = undefined; $("feed").replaceChildren(); clearCard(); drawRoute();
+      $("task").textContent = ev.task; show("goal", false); show("home", false); show("composer", false); show("run", true); now("Reading your request…"); break;
+    case "route":
+      $("goal").textContent = ev.goal || ""; show("goal", !!ev.goal);
+      S.route = ev.steps || []; S.cur = 0; drawRoute(); break;
+    case "plan":
+      if (ev.label !== "Plan" && ev.note) feed("info", "Changed approach: " + ev.note);
+      S.route = S.route.slice(0, Math.max(S.cur - 1, 0)).concat(ev.steps || []); drawRoute(); break;
+    case "step":
+      while (S.route.length < ev.total) S.route.push("…");
+      S.route[ev.index - 1] = ev.goal; S.cur = ev.index; drawRoute(); now(ev.goal); break;
+    case "note": feed("note", ev.text); now(ev.text); break;
+    case "action": {
+      feed("act" + (ev.ok ? "" : " fail"), ev.text + (ev.ok ? "" : " (didn't work" + (ev.error ? ": " + ev.error : "") + ")"));
+      if (ev.detail) { const d = el("details"); d.append(el("summary", "", "details"), el("pre", "", ev.detail)); $("feed").append(d); }
+      break; }
+    case "info": feed("info", ev.text); break;
+    case "ask": askCard(ev); now(ev.question); break;
+    case "confirm": confirmCard(ev); now("Waiting for your OK"); break;
+    case "keep_going": yesNoCard(ev, "This is taking a while. Keep going?", ev.what, "Keep going", "Stop here"); now("Waiting for you"); break;
+    case "answered": {
+      const q = S.pending; clearCard();
+      const line = feed("qa", "");
+      const said = ev.kind === "ask" ? (ev.value || (q && q.default) || "you decide") : (ev.value ? (ev.kind === "confirm" ? "allowed" : "keep going") : (ev.kind === "confirm" ? "not allowed" : "stop here"));
+      line.append((q && (q.question || (ev.kind === "confirm" ? "May I do this?" : "Keep going?"))) + " ", el("b", "", said));
+      break; }
+    case "stopping": now("Stopping…"); $("stop").disabled = true; break;
+    case "state": setState(ev.state, S.ok); if (ev.state !== "done") $("stop").disabled = false; break;
+    case "done":
+      S.ok = ev.success; resultCard(ev); setState("done", ev.success);
+      $("box").placeholder = "Anything else?"; show("composer", true); break;
+    case "rated": {
+      const c = $("card").firstChild; if (c && c.dataset.rating) c.lastChild.replaceChildren(el("span", "soft", ev.rating === "up" ? "Thanks. Noted as a success." : "Thanks. Noted, so Pilot can learn from it."));
+      break; }
+  }
+}
+
+async function pump() {
+  for (;;) {
+    try {
+      const r = await api("/api/events?after=" + S.seq + "&wait=25");
+      (r.events || []).forEach(apply);
+    } catch (e) { $("status").textContent = "Pilot has quit. Open it again to continue."; await new Promise((r) => setTimeout(r, 2000)); }
+  }
+}
+
+async function refresh() {
+  const st = await api("/api/state");
+  S.ready = st.ready;
+  for (const li of document.querySelectorAll("#setup li")) {
+    const yes = !!st[li.dataset.key];
+    li.classList.toggle("yes", yes); li.querySelector(".mark").textContent = yes ? "✓" : ""; li.querySelector("button").hidden = yes;
+    const small = li.querySelector("small"); small.dataset.todo = small.dataset.todo || small.textContent; small.textContent = yes ? "Done." : small.dataset.todo;
+  }
+  $("restart").hidden = !(st.model && !(st.control && st.screen));
+  $("setup-note").hidden = st.control && st.screen;
+  if (!$("chips").childElementCount) $("chips").append(...(st.examples || []).map((t) => { const b = el("button", "", t); b.onclick = () => { $("box").value = t; $("box").focus(); }; return b; }));
+  const idle = st.state === "idle" && S.seq === 0;
+  show("setup", !st.ready && idle);
+  show("home", st.ready && idle);
+  show("composer", (st.ready && idle) || S.state === "done");
+  if (!st.ready && idle) setState("setup"); else if (idle) { setState("idle"); $("box").focus(); }
+  return st;
+}
+
+function start() {
+  const task = $("box").value.trim();
+  if (!task) { $("box").focus(); return; }
+  $("go").disabled = true;
+  api("/api/task", { task }).then((r) => { $("go").disabled = false; if (r.ok) $("box").value = ""; });
+}
+$("go").onclick = start;
+$("box").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); start(); } });
+$("stop").onclick = () => { $("stop").disabled = true; api("/api/stop", {}); };
+$("recheck").onclick = refresh;
+$("restart").onclick = () => api("/api/setup", { what: "restart" });
+for (const b of document.querySelectorAll("[data-setup]")) b.onclick = async () => {
+  const r = await api("/api/setup", { what: b.dataset.setup }); if (r.note) $("setup-note").textContent = r.note, $("setup-note").hidden = false;
+};
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !S.ready) refresh(); });
+setInterval(() => { if (!S.ready && S.seq === 0) refresh(); }, 3000);
+refresh().then(pump);
+</script>
+</body>
+</html>
