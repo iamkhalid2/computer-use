@@ -167,8 +167,9 @@ class Agent:
         self.space = "pixels" if self.executor.native_computer else settings.executor.coord_space
         if hasattr(env, "configure"):
             env.configure(settings.profile)
-        confirm = (lambda prompt: self._waiting(reporter.confirm, prompt)) if settings.interactive else None
+        confirm = self._confirm if settings.interactive else None
         self.policy = Policy(settings.approve, confirm)
+        self.policy.on_grant = self._granted
         ask: Callable[[str], str] | None = self._ask if settings.interactive else None
         self.told: list[tuple[str, str]] = []  # what the user answered when asked, for the whole run
         self.route: list[str] = []
@@ -197,6 +198,9 @@ class Agent:
         self.skills = skills if skills is not None else (Skills(mode=settings.playbooks) if settings.playbooks != "off" else None)
         self.led: Any = None  # the playbook the executor is leading from, if any
         self.worked = 0.0
+        self.earlier: list[str] = []  # the user's earlier messages for the job this run continues
+        self.finished = 0  # steps finished this run: a limit is passed silently while this keeps growing
+        self.marks: dict[str, int] = {}
 
     # -- bookkeeping -------------------------------------------------------------------
     def _switched(self, message: str) -> None:
@@ -216,13 +220,34 @@ class Agent:
         if over is None:
             return
         key, more, what = over
-        # A long job stops at its limit only if nobody is there to say "keep going": the limit is the
-        # user's, so the user may raise it, one allowance at a time.
-        if self.s.interactive and self._waiting(self.r.keep_going, what, self._progress):
+        # With a person there, a limit is a check for a run that has stalled, not a stopwatch: while steps keep
+        # finishing Pilot carries on (asking at 80 turns, in the middle of a job going well, was the complaint),
+        # and it asks only when a whole allowance went by with no step finished. Unattended runs stop at it.
+        if self.s.interactive and self.finished > self.marks.get(key, 0):
+            self.marks[key] = self.finished
             lim[key] += more
-            self.trace.log("budget_extended", limit=key, now=lim[key])
+            self.trace.log("budget_extended", limit=key, now=lim[key], asked=False, steps_finished=self.finished)
             return
+        if self.s.interactive:
+            go = bool(self._waiting(self.r.keep_going, what + " with no step finished since the last check", self._progress))
+            self.trace.log("asked_keep_going", limit=key, answer=go)
+            if go:
+                self.marks[key] = self.finished
+                lim[key] += more
+                self.trace.log("budget_extended", limit=key, now=lim[key], asked=True, steps_finished=self.finished)
+                return
         raise BudgetExceeded(what)
+
+    def _confirm(self, prompt: str) -> bool:
+        ok = bool(self._waiting(self.r.confirm, prompt))
+        if self.trace is not None:
+            self.trace.log("confirm", prompt=prompt[:300], allowed=ok)
+        return ok
+
+    def _granted(self, action: str, reason: str) -> None:
+        """An action the guard would have asked about, allowed by the user's own "don't ask me for permission"."""
+        if self.trace is not None:
+            self.trace.log("granted", action=action[:300], reason=reason)
 
     # -- the user ----------------------------------------------------------------------
     def _waiting(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -248,7 +273,14 @@ class Agent:
         return answer
 
     def goal(self, task: str) -> str:
-        return intake.clarified(task, self.told)
+        return intake.clarified(self.job_words(task), self.told)
+
+    def job_words(self, task: str) -> str:
+        """The request in the user's words: one message, or every message of the job this run continues."""
+        if not self.earlier:
+            return task
+        return ("The job, in the user's words, oldest first:\n" + "\n".join(f"- {w}" for w in self.earlier)
+                + f"\n- {task} (latest message)")
 
     def _open_front_desk(self, task: str, context: str) -> None:
         self.front = None
@@ -608,10 +640,13 @@ class Agent:
         return None
 
     # -- orchestration ---------------------------------------------------------------------
-    def run(self, task: str, context: str = "") -> Outcome:
+    def run(self, task: str, context: str = "", earlier: list[str] | None = None) -> Outcome:
         s = self.s
+        self.earlier = [w for w in (earlier or []) if w.strip()]
         meta = {"planner": s.planner.label if s.planner else None, "executor": s.executor.label, "preset": s.preset,
                 "coords": self.space, "ax": self.env.use_ax, "geometry": vars(self.env.geometry)}
+        if self.earlier:
+            meta["continues"] = self.earlier
         self.trace = Trace(s.runs_dir, task, meta)
         self.cur_image: str | None = None
         self.cur_text: str | None = None
@@ -624,13 +659,15 @@ class Agent:
         self.planned = False
         self.told, self.route, self.waited = [], [], 0.0
         self.limits = {"minutes": s.max_minutes, "cost": s.max_cost, "turns": s.max_turns}
+        self.finished, self.marks = 0, {}
         self._progress = ""
-        # Authorisation comes from the user's own words for this task, never from the screen.
-        self.policy.scope = TaskScope.from_task(task, s.write_roots)
+        # Authorisation comes from the user's own words for this job (every message of it), never from the screen.
+        words = "\n".join([*self.earlier, task])
+        self.policy.scope = TaskScope.from_task(words, s.write_roots)
         self._open_front_desk(task, context)
         self.lessons = ""
         if self.memory is not None:
-            chosen = self.memory.select(task)
+            chosen = self.memory.select(words)
             self.lessons = Experience.brief(chosen)
             self.trace.log("lessons", ids=[x.id for x, _ in chosen], relevance=[round(r, 2) for _, r in chosen], mode=self.memory.mode)
         self.r.header(task, s)
@@ -639,12 +676,13 @@ class Agent:
         upfront = self.planner is not None and s.profile.plan == "upfront"
         self.led = None
         if self.skills is not None:
-            self.led, why = self.skills.route(task)
+            # A continued job keeps its lead: its first message says what kind of job it is ("continue" says nothing).
+            self.led, why = self.skills.route(self.earlier[0] if self.earlier else task)
             if self.planner is not None:
                 upfront = self.led is None
             self.trace.log("lead", **why)
             self.r.lead(why)
-            book = Skills.brief(self.led, self.skills.parts(task, skip=self.led.id if self.led else ""))
+            book = Skills.brief(self.led, self.skills.parts(words, skip=self.led.id if self.led else ""))
             self.lessons = "\n\n".join(x for x in (self.lessons, book) if x)
         success, answer, summary, reason = False, "", "", ""
         steps: list[Step] = []
@@ -688,6 +726,7 @@ class Agent:
                         continue
                     if res.kind == "done" and res.success:
                         steps[i].status, steps[i].summary, steps[i].found = "done", res.summary, res.answer[:FOUND_CHARS]
+                        self.finished += 1
                         answer = res.answer or answer
                         summary = res.summary
                         i += 1

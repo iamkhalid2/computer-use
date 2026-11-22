@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Callable
 
 from PIL import Image
 
@@ -29,6 +30,8 @@ class MacEnv:
         self.last_snapshot: Snapshot | None = None
         self.last_image: Image.Image | None = None
         self.host_pid = self._host_pid()
+        # Set by the Pilot window: moves itself off a point Pilot needs to reach. True when it moved.
+        self.make_room: Callable[[float, float], bool] | None = None
         self.outline_max_lines, self.outline_max_chars = 180, 8000
         self.compact, self.settle_timeout = True, 1.5
 
@@ -114,6 +117,10 @@ class MacEnv:
             return self.ax.frontmost()
         except Exception:
             return (-1, "unknown", None)
+
+    def host_window_at(self, x: float, y: float) -> bool:
+        """True when the window on top at (x, y) is Pilot's own (its window, or the terminal running it)."""
+        return bool(self.host_pid) and apps.owner_at(x, y) == self.host_pid
 
     def _host_pid(self) -> int | None:
         """The terminal app hosting Pilot, so we never type into ourselves."""

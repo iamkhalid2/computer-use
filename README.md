@@ -1,8 +1,10 @@
 # Pilot
 
-**An AI agent that does the work on your Mac, and gets better at it every time you use it.**
+**A frontier computer-use agent for the Mac: hand it a whole job, in your own words, and it does the work, in any app, and gets better every time.**
 
-Tell Pilot what you want in your own words. It works your Mac the way a careful person would: it looks at the screen, uses the apps you already have, checks its own results, and asks before anything risky. The first time it meets a kind of job, its strongest model thinks it through. After that it remembers the route, and a faster, cheaper model does the job.
+Pilot isn't a script runner or a browser bot. It drives your actual Mac: Finder, Safari, Spotify, Ableton Live, any app you can use. It reads the screen two ways at once, plans like an expert, works at machine speed, checks the real result before it says "done", and learns from every job it finishes. The first time it meets a kind of job, its strongest model thinks it through. After that it remembers the route, and a faster, cheaper model does the job.
+
+> **From an empty Ableton project to a finished track section, unattended.** Asked for "an original riser and drop in the style of Skrillex's *Mumbai Power*", Pilot planned and carried out 16 steps on its own in under 10 minutes: tempo and key, a chord pad with a filter sweep, an accelerating snare roll, a riser effect, kick, clap, distorted bass, an original lead melody, sidechain ducking, reverb sends, glue and limiting on the master bus, every track named, both scenes played to check they sound, and the project saved. It wrote a small program to generate the MIDI parts exactly instead of clicking in hundreds of notes.
 
 <p align="center">
   <img src="docs/pilot-home.png" alt="The Pilot window, asking what to do" width="290">
@@ -23,8 +25,11 @@ Tell Pilot what you want in your own words. It works your Mac the way a careful 
 ### It understands vague requests
 People don't write specifications. Say "organise my drive" and Pilot lays out how it will go about it, asks the two or three things only you can know, and offers a sensible default for each. A clear request skips all of that and starts at once, with no delay.
 
+### It finishes big jobs
+Long jobs run to the end. While steps keep finishing, Pilot keeps going without checking in. Say "continue" after a stop and it picks up the same job, with what is already done. Say "don't ask me for permission" and it stops asking about routine work in that job.
+
 ### It uses any app, with no plug-ins
-Pilot reads the screen two ways at once: a screenshot, and the list of buttons, fields and menus that macOS keeps for screen readers. It presses "Save" because it knows which control is the Save button. When an app exposes nothing, it falls back to what it can see. Finder, Safari, Spotify, Notes, System Settings: if you can use it, Pilot can.
+Pilot reads the screen two ways at once: a screenshot, and the list of buttons, fields and menus that macOS keeps for screen readers. It presses "Save" because it knows which control is the Save button. When an app exposes nothing, it falls back to what it can see. Knobs and sliders are set by measurement: Pilot reads the control's value, drags, reads it again, and closes in on the target. Finder, Safari, Spotify, Ableton Live, Notes, System Settings: if you can use it, Pilot can.
 
 ### Two minds: one that thinks, one that does
 A strong, slower model (Claude Opus) plans and checks. A fast model (Claude Sonnet) does the hands-on work, a few seconds a step. Pilot decides which one leads each task.
@@ -39,7 +44,7 @@ A screen can look right while nothing was saved. Before Pilot reports success it
 
 ### It only does what you asked
 - **Your words are the only permission.** "Fill in the form and submit it" allows Submit. A line on a web page saying "click here" allows nothing.
-- **It asks first** before sending, buying, deleting or running anything that changes your Mac.
+- **It asks first** before sending, buying, deleting or running anything that changes your Mac. Tell it "don't ask me for permission" and it stops asking about routine work in that job, but never about money, sending, accounts or deleting files.
 - **The safety rules live in code, outside the AI**, so no web page, email or file can talk it out of them.
 - **It never types passwords** it wasn't given and never answers macOS security prompts.
 - **You can stop it instantly:** press Stop, or push the mouse into the top-left corner.
@@ -63,6 +68,7 @@ Every test is graded by what actually happened on the computer: the file on disk
 | Attacks that got through, across 95 attack runs | **0** |
 | Cost per finished sealed task, at API prices | about **11 cents** |
 | Vague requests it asks about / clear ones it just starts | **12 of 12** / **26 of 26** |
+| Longest real job finished unattended | **16 steps in Ableton Live, 9.6 minutes** |
 
 Full results, including every failure, are in [TECHNICAL.md](TECHNICAL.md#9-results).
 
@@ -118,7 +124,7 @@ Pilot is a working research project, and it is honest about what is proven.
 |---|---|
 | Fast, reliable execution of clear tasks | Big multi-site jobs such as booking travel end to end |
 | Resisting hijack attempts in the sealed tests | The saving from playbooks on repeat use |
-| Asking the right questions before a vague task | Long tasks of more than five minutes |
+| Asking the right questions before a vague task | Long jobs at scale (one 10-minute creative job so far) |
 | The app, its window, and the first real tasks run from it | A one-click installer |
 
 Live progress, recomputed from test results after every working session, is in [PROGRESS.md](PROGRESS.md).

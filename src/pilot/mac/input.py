@@ -31,11 +31,14 @@ class Input:
         loc = self._q.CGEventGetLocation(self._q.CGEventCreate(None))
         return (loc.x, loc.y)
 
-    def _mouse(self, kind, x: float, y: float, button, flags: int = 0, clicks: int = 1) -> None:
+    def _mouse(self, kind, x: float, y: float, button, flags: int = 0, clicks: int = 1, delta: tuple[int, int] | None = None) -> None:
         q = self._q
         ev = q.CGEventCreateMouseEvent(self._source, kind, (x, y), button)
         if clicks > 1:
             q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, clicks)
+        if delta is not None:  # what a real mouse reports with each move; apps that hide the pointer read only this
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaX, int(delta[0]))
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(delta[1]))
         if flags:
             q.CGEventSetFlags(ev, flags)
         self._post(ev)
@@ -69,19 +72,53 @@ class Input:
         x, y = self.position()
         self._mouse(self._q.kCGEventLeftMouseUp, x, y, self._q.kCGMouseButtonLeft)
 
-    def drag(self, x0: float, y0: float, x1: float, y1: float, modifiers: str | None = None, duration: float = 0.35) -> None:
+    def drag(self, x0: float, y0: float, x1: float, y1: float, modifiers: str | None = None, duration: float = 0.35) -> bool:
+        """Press at (x0, y0), move by (x1 - x0, y1 - y0) and release, the way a hand on a mouse does it.
+
+        Most apps follow the pointer, so the moves trace a path to (x1, y1). Knobs and faders in audio and
+        3D apps instead hide the pointer, put it back where it was pressed after every move, and read each
+        move from there. A path laid out from the press point then reads as ever-larger jumps that add up:
+        in Ableton Live an 8-point drag sent a send knob from its minimum to two thirds, and 10 points to its
+        maximum. So once the pointer is seen going back to the press point, each move is made from where the
+        pointer really is, by the path's own increment. Every move also carries that increment as its delta,
+        as hardware events do. The first move is exactly one point, so which kind of app this is is known
+        before anything adds up. Returns True when the app was seen holding the pointer in place.
+        """
         q = self._q
         flags = parse_modifiers(modifiers)
         self.move(x0, y0)
         time.sleep(0.03)
         self._mouse(q.kCGEventLeftMouseDown, x0, y0, q.kCGMouseButtonLeft, flags)
+        dist = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        held = False
+        sent = (0, 0)  # the deltas reported so far, kept equal to the path's rounded offset
+        prev = start = (x0, y0)
+        if dist >= 2:
+            probe = (x0 + (x1 - x0) / dist, y0 + (y1 - y0) / dist)  # one point along the drag
+            sent = (round(probe[0] - x0), round(probe[1] - y0))
+            self._mouse(q.kCGEventLeftMouseDragged, *probe, q.kCGMouseButtonLeft, flags, delta=sent)
+            time.sleep(0.03)
+            cx, cy = self.position()
+            held = abs(cx - x0) + abs(cy - y0) <= 0.75 and abs(cx - probe[0]) + abs(cy - probe[1]) >= 0.75
+            prev = start = probe
         steps = max(8, int(duration / 0.015))
+        at = prev
         for i in range(1, steps + 1):
             t = i / steps
             t = t * t * (3 - 2 * t)  # ease in/out so drop targets register hover
-            self._mouse(q.kCGEventLeftMouseDragged, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, q.kCGMouseButtonLeft, flags)
+            px, py = start[0] + (x1 - start[0]) * t, start[1] + (y1 - start[1]) * t
+            if held:  # from wherever the app put the pointer back, by this move's share of the path
+                cx, cy = self.position()
+                at = (cx + px - prev[0], cy + py - prev[1])
+            else:
+                at = (px, py)
+            d = (round(px - x0) - sent[0], round(py - y0) - sent[1])
+            sent = (sent[0] + d[0], sent[1] + d[1])
+            prev = (px, py)
+            self._mouse(q.kCGEventLeftMouseDragged, at[0], at[1], q.kCGMouseButtonLeft, flags, delta=d)
             time.sleep(duration / steps)
-        self._mouse(q.kCGEventLeftMouseUp, x1, y1, q.kCGMouseButtonLeft, flags)
+        self._mouse(q.kCGEventLeftMouseUp, *(self.position() if held else (x1, y1)), q.kCGMouseButtonLeft, flags)
+        return held
 
     def scroll(self, x: float, y: float, direction: str, amount: int = 3, modifiers: str | None = None) -> None:
         q = self._q

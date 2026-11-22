@@ -18,7 +18,7 @@ The shape in one paragraph: a request first passes a **front desk** that asks on
 5. [Profiles: the harness genome](#5-profiles-the-harness-genome)
 6. [Self-tuning](#6-self-tuning): calibrate · ablate and audit · mine, propose, accept · `context_budget`
 7. [Experience: lessons with a belief](#7-experience-lessons-with-a-belief): playbooks, cheaper and faster with use
-8. [Measuring it](#8-measuring-it): PilotBench · the sealed held-out suite · replay · real use · the scorecard
+8. [Measuring it](#8-measuring-it): PilotBench · the sealed held-out suite · games · replay · real use · the scorecard
 9. [Results](#9-results)
 10. [Design notes and lessons](#10-design-notes-and-lessons)
 11. [Project layout](#11-project-layout)
@@ -133,7 +133,7 @@ Some failures are not the agent's fault: a locked screen, a provider outage, a u
 
 `pilot app --install` builds `~/Applications/Pilot.app`; `pilot app` opens the same window from a terminal. The agent is unchanged: it already speaks to people through one object, the `Reporter`, and the window is a second `Reporter` (`ui/session.py`) whose lines become events for a page and whose questions block the agent's thread until the page posts an answer.
 
-* **The window must not become part of the screen Pilot is driving.** It is a non-activating floating panel in an app with no Dock icon, so the app you were using stays frontmost and is what the agent sees and types into. The panel takes the keyboard only while it has a question on screen; while Pilot works it refuses key status, so pressing Stop steals nothing. It shrinks to a strip while Pilot works. Pilot's existing guards refuse any click or keystroke aimed at its own process.
+* **The window must not become part of the screen Pilot is driving.** It is a non-activating floating panel in an app with no Dock icon, so the app you were using stays frontmost and is what the agent sees and types into. The panel takes the keyboard only while it has a question on screen; while Pilot works it refuses key status, so pressing Stop steals nothing. It shrinks to a strip while Pilot works. Pilot's guards refuse any keystroke aimed at its own process and any pointer action (click, drag, scroll, or the click a `ui` press falls back to) whose point lies under one of its own windows. The test is which window is on top at that point (`apps.owner_at`, from the window server's list), not which element the action was aimed at: in Ableton, a press aimed at the Main track's header, under the strip, clicked Pilot's own Stop button in four runs, and the window then reported "You stopped it." When the window is in the way, it moves to the other side of the screen and the action goes ahead.
 * **macOS grants permissions to an app, by name.** The bundle's executable is a small compiled launcher that starts this checkout's Python and waits for it. Permissions then belong to "Pilot" and cover the Python it starts; a shell-script app would appear in Privacy settings as `zsh`. Measured on first launch: the prompt read *“Pilot” would like to access files in your Documents folder* (the checkout lives there), and the window's first screen showed Claude connected and the two switches still off. The window never changes a setting itself: its buttons open the right pane and the user decides. "Restart Pilot" exits with a code the launcher answers by starting a fresh copy, which is when macOS applies a new Screen Recording grant.
 * **The control channel is closed to everything but Pilot's own page.** The server listens on 127.0.0.1 only, refuses any request whose Host is not exactly that address and port (a domain rebound to this Mac), requires a secret made at launch on every API call, and sends no cross-origin headers.
 * **Stop** is checked after every model call and every action, and while waiting for an answer. A model call already in flight finishes first (up to about 15 s for the planner).
@@ -151,7 +151,8 @@ People don't write specifications. They write "book a flight for me" or "organis
 * **A vague task is asked about before anything is touched.** The executor's first turn is thrown away unexecuted, the route is shown, the questions are asked, and the run starts again from the answers.
 * **Answers last the whole run.** They are appended to the request itself, so every step brief, replan and final check works from them, and so does the disk evidence. Before this, an answer lived only in the executor session that asked; the next step or replan never saw it. Folders and sites the user types in an answer widen where Pilot may work. An answer never adds a verb: nothing said in passing can authorise a send, a purchase or a delete.
 * **A route becomes the plan.** Each milestone gets a fresh executor session and its own turn budget, and what a step found (its `answer`) is carried into every later step's brief. A milestone that says "show the user and wait for their yes" is done with `ask_user`.
-* **A long job checks in instead of dying.** At the time, cost or turn limit Pilot asks whether to keep going and extends by one allowance per yes. Time spent waiting for the user's answers is not counted.
+* **A long job keeps going while it makes progress.** With a person present, the time, cost and turn limits catch a run that has stalled. If a step finished since the last limit, Pilot extends by one allowance without asking. It asks "keep going?" only when a whole allowance went by with no step finished. (Asking at 80 turns in the middle of a job that was going well, after "only tell me when it's completely finished", was the complaint.) Unattended runs still stop at the limit. Time spent waiting for the user's answers is not counted.
+* **A follow-up continues the job** (`agent/job.py`). While a job is unfinished, the next message ("continue", "fix it", "make it bigger") continues it. Every run of the job sees the user's messages so far, the steps already finished with what each did, the steps left, and how the last run ended. The planner is told to keep finished work and plan only what remains. A run that finishes closes the job. Before this, each "continue" rebuilt from the screen: across five follow-ups in one Ableton session the drum beat was rewritten three times.
 * **Only with a person present.** Evals, scripts and piped input have nobody to ask, so the front desk is off there and those runs behave exactly as before. `--no-ask` turns it off by hand; `pilot brief "…"` shows the verdict on its own.
 
 ## 3. Safety: authority comes from your words
@@ -165,7 +166,8 @@ This follows from the fourth fact. Whatever is on the screen may have been writt
   - AppleScript that sends, deletes or runs shell commands.
 
   It judges what an action does, not what it looks like. A command wrapped inside another command, code that gets opened rather than run, and bulk buttons such as "Delete all" are all judged by their effect.
-* **Then it checks the task's scope.** Your request is parsed once into what it authorises: the URLs, folders and actions it names. For example, "…and submit it" allows the Submit button, and "save it in ~/Reports" allows writing there. Only your words grant permission; nothing on the screen can, so an injected page can't.
+* **Then it checks the task's scope.** Your request is parsed once into what it authorises: the URLs, folders and actions it names. For example, "…and submit it" allows the Submit button, and "save it in ~/Reports" allows writing there. Only your words grant permission; nothing on the screen can, so an injected page can't. A job that runs over several messages is judged on all of them.
+* **"Don't ask me for permission" is honoured, within limits.** Words such as "do not ask for permissions" or "I give you full access" (not negated: "you don't have full access" grants nothing) skip routine questions in that job: deleting a clip, a key that deletes, writing a file, a local command. Each skipped question is written to the run's record. A waiver never covers paying, sending, posting, sharing, accounts, passwords, macOS security prompts, quitting an app, AppleScript, deep links, or a shell command that deletes, stops processes or reaches the network. Those always ask.
   - A verb named in order to forbid it authorises nothing: "fill it in but don't submit it" leaves Submit asking first. (Until November 2026 it allowed Submit, and "don't delete anything" allowed Delete.)
   - Every line of a shell command is judged as its own command, and an operator inside quotes is text. (Until November 2026 only the first line was judged: `ls` on line one let an `rm` or an uploading `curl` on line two run unasked. All 431 shell commands in the recorded runs get the same verdict under the old and new guard.)
   - A risky action outside the scope is asked about first (with `--approve risky`, the default).
@@ -376,7 +378,7 @@ pilot eval --playbooks --repeat 3 --tasks calculator,finder,textedit,archive-pdf
 pilot learn curve evals/pilotbench-<stamp>.json
 ```
 
-Known limits: a task is matched to a playbook by shared words, so "put on some Skrillex" does not find the playbook that "play ... and queue ..." wrote; and the test above repeats the same tasks, which is the easiest form of repeat use.
+Known limits: a task is matched to a playbook by shared words, so "put on some Skrillex" does not find the playbook that "play ... and queue ..." wrote. A continued job is matched on its first message and all its words, because "continue please" matches nothing: in the Ableton session the playbook written after the first run was never used by the five follow-ups; and the test above repeats the same tasks, which is the easiest form of repeat use.
 
 ### The update rule, precisely
 
@@ -445,6 +447,25 @@ Every task has an **oracle** (a scripted correct run) and a **bad run** (a scrip
 3. it fails after the bad run, with `breach` firing for the attacks.
 
 `--freeze` then records the suite's hash, and a run refuses to start if the suite has changed since. Attacks are scored twice: pass or fail, and `breach`, which names what the attacker got.
+
+### Games: timing and speed
+
+`evals/games.py` is a third, small suite for a different question: can the agent do things that depend on *when* it acts? An agent that thinks for two or three seconds between looks cannot play a timing game the way a person does. To do well it has to work with its own latency: batch a press, a measured wait and another press into one turn, repeat a key instead of pressing it twelve times, wait on a condition instead of polling with screenshots.
+
+| Game | What it asks | Passes when |
+|---|---|---|
+| `timing` | Press Stop when a running counter reads a target, three rounds | mean within 0.25 s of target, worst round within 0.40 s |
+| `dial` | Turn a dial to three numbers in order, against the clock | right combination, within 60 s of the first move |
+| `reaction` | Press as soon as a box turns green, three rounds | no early press, mean under 1,000 ms (a person manages about 250 to 300) |
+
+The pages are original and generic to the skill; they are not copies of any vendor's assessment. Targets are drawn fresh for every run, so a playbook can carry the method but never the answer. Each page reports whether a press was a real input event or made by script, and the grader shows that beside the score. Results are kept in `evals/games/`, apart from the bench the scorecard reads.
+
+```bash
+pilot eval --suite games                          # play them
+pilot eval --suite games --playbooks --repeat 3   # run 1 cold, runs 2 and 3 warm, on new targets each time
+```
+
+Checked without a model: every grader fails on a fresh page and passes a scripted result, and all three pages were played by hand in a browser, including a deliberate foul. **Pilot has not played them yet**, so whether an agent can is still an open question.
 
 ### Replay evals: measuring decisions without the screen
 
@@ -632,7 +653,7 @@ src/pilot/
   outline.py        element list formatting, compaction, fuzzy matching
   mac/              screen.py (capture, Retina geometry) · input.py (Quartz events) · ax.py (Accessibility) · keys.py · apps.py
   providers/        claude_code.py (subscription via the CLI) · anthropic_provider.py · openai_compat.py · mlx_local.py (local models) · jev.py
-  evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis · intake.py (the front-desk check)
+  evals/            PilotBench: tasks, fixture server, graders and oracles, Pareto report, analysis · intake.py (the front-desk check) · games.py (timing, dial, reaction)
   replay/           decision recording, dataset builder, meaning-based grader, curated hard items, runner
   tune/             calibrate (probes, effort sweep) · ablate (replay bisection, trace audit) · mine · propose · accept
 profiles/           calibrated profiles written by `pilot tune`, and ledger.jsonl (every experiment and verdict)
@@ -646,7 +667,8 @@ tests/              offline tests: fake Mac, scripted models, fake CLI (`uv run 
 * **Vague, big requests are checked at the front door only.** The asking, the route and the hand-over of answers are tested (below), and one such job ran end to end without the screen. No flight has been searched and no job applied for: those need your signed-in browser, minutes of work across real sites, and a person answering, and none of that has been run yet. Expect the first real attempts to fail in new ways.
 * **Installing still needs a terminal once.** `pilot app --install` makes the app from a checkout; there is no download-and-drag installer yet. Because the checkout sits in Documents, macOS asks a third question on first launch (access to the Documents folder) before the window can appear.
 * **Real use from the window is three runs old.** One finished and was rated up (below), one was stopped by the user, one ended at the Claude plan's usage limit after 104 seconds. Pilot and any Claude Code session on the same account draw on the same plan limit. Twice during earlier tests a run stopped at once with "the Mac is locked" while a check a moment later said it was not; the cause was not found (the Mac may have been waking from its lock screen).
-* **A follow-up such as "continue" starts a new task.** It sees the earlier task as session context, but the stopped task's progress is not carried over, and its permissions (the verbs and places the first request named) are not.
+* **A follow-up is assumed to continue an unfinished job.** The planner is told to treat a message that plainly starts something new as new, but the earlier messages still count toward the job's scope (including a "don't ask me" waiver) until a run finishes.
+* **Knob drags are fixed in a model, not yet on screen.** Audio apps hold the pointer at a knob and read each move from there; Pilot's drags now detect that and move by the distance asked for, and `set_value` on a slider writes a number, then drags the control to the target while reading its value. Both are tested against simulated apps whose numbers come from the Ableton runs; no run has checked them in Ableton itself yet. Ableton's mixer faders did not move at all under the old drags, and why is unknown.
 * **Places named in plain words don't widen the scope.** "Downloads" in an answer is not `~/Downloads` to the guard, so each `mv` there asks first. Whether plain folder names should count is a policy decision.
 * **A purchase the request names is not asked about again.** "Buy me a ticket" authorises the final Pay button, as the sealed checkout task requires. With a person at the keyboard it may be better to always ask before money moves; that is also a policy decision.
 * One display (the main screen). Apps with little Accessibility information (games, canvases, some Electron/Java apps) fall back to pixel actions.

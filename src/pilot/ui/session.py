@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from ..agent.job import Job
 from ..console import Reporter
 from ..safety import Aborted
 
@@ -159,7 +160,8 @@ class Session:
         self.pending: dict[str, Any] | None = None  # the question on screen: {"id", "kind", "answer", "answered"}
         self.result: dict[str, Any] | None = None
         self.last_run: Path | None = None
-        self.history: list[str] = []
+        self.job = Job()  # an unfinished request carries over to the next message ("continue", "fix it")
+        self.room: Callable[[float, float], bool] | None = None  # the window's: step aside from a point Pilot must click
         self.thread: threading.Thread | None = None
         self.make_agent = make_agent or default_agent
         self.on_state = on_state
@@ -250,6 +252,13 @@ class Session:
         self._set("working")
         return p["answer"]
 
+    def make_room(self, x: float, y: float) -> bool:
+        """Move the window off (x, y) if it covers it. True when it moved."""
+        try:
+            return bool(self.room and self.room(x, y))
+        except Exception:  # noqa: BLE001 - a window that can't move just means the click is refused
+            return False
+
     def _run(self, task: str) -> None:
         from ..mac.apps import KeepAwake
 
@@ -257,9 +266,9 @@ class Session:
             if self._agent is None:
                 self._agent = self.make_agent(self)
             with KeepAwake():
-                out = self._agent.run(task, context=" | ".join(self.history[-4:]))
+                out = self._agent.run(task, context=self.job.context(), earlier=self.job.earlier())
             self.last_run = Path(out.report).parent if out.report else None
-            self.history.append(f"{task} → {'done' if out.success else 'not done'}{': ' + out.answer[:120] if out.answer else ''}")
+            self.job.after(task, out)
             res = self.result or {}
             stopped = self.stop.is_set()
             worked = max(out.seconds - float(getattr(self._agent, "waited", 0.0) or 0.0), 0.0)  # not the time spent waiting for answers
@@ -267,6 +276,7 @@ class Session:
                       reason="" if out.success else ("You stopped it." if stopped else out.reason),
                       seconds=round(worked, 1), actions=res.get("actions", 0), report=out.report)
         except Exception as e:  # noqa: BLE001 - whatever went wrong, the window must say so and be usable again
+            self.job.crashed(task, f"{type(e).__name__}: {e}")
             self.emit("done", success=False, stopped=False, answer="", summary="", reason=f"{type(e).__name__}: {e}"[:600], seconds=0, actions=0, report="")
         finally:
             self.pending = None
@@ -283,6 +293,7 @@ def default_agent(session: Session) -> Any:
     settings = build_settings(interactive=True, playbooks="learn")
     env = MacEnv(settings.profile.max_long_edge, settings.profile.image_format, settings.profile.use_ax)
     env.host_pid = os.getpid()  # Pilot never clicks or types into its own window
+    env.make_room = session.make_room  # and when its window covers what it needs, the window steps aside
     return Agent(settings, env, session.reporter, Jev())
 
 

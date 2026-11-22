@@ -23,8 +23,10 @@ class FakeAgent:
 
     def __init__(self, session, script):
         self.r, self.script = session.reporter, script
+        self.calls = []
 
-    def run(self, task, context=""):
+    def run(self, task, context="", earlier=None):
+        self.calls.append((task, context, list(earlier or [])))
         stats = SimpleNamespace(actions=2, cost=0, cost_known=False, model_calls=1, model_seconds=0.1)
         try:
             answer = self.script(self.r, task)

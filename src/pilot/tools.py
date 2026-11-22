@@ -405,6 +405,143 @@ class Toolbox:
         ok, msg = self.policy.check(verdict, action)
         return None if ok else msg
 
+    # -- controls that hold a number: sliders, knobs, faders, steppers -----------------------
+    VALUE_ROLES = {"AXSlider", "AXIncrementor", "AXValueIndicator", "AXLevelIndicator"}
+    SLIDER_TRIES = 8  # drags allowed to bring a control to the value asked for
+
+    def _number(self, v: Any) -> float | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        m = re.fullmatch(r"\s*([-+−]?\d+(?:\.\d+)?)\s*", str(v or ""))
+        return float(m.group(1).replace("−", "-")) if m else None
+
+    def _reading(self, node: Node | None) -> float | None:
+        if node is None or node.ref is None or node.role not in self.VALUE_ROLES:
+            return None
+        return self._number(self.env.ax.attr(node.ref, "AXValue"))
+
+    def _range(self, node: Node) -> tuple[float | None, float | None]:
+        ax = self.env.ax
+        return self._number(ax.attr(node.ref, "AXMinValue")), self._number(ax.attr(node.ref, "AXMaxValue"))
+
+    def _span(self, node: Node) -> str:
+        lo, hi = self._range(node)
+        return f" (its range is {lo:g} to {hi:g})" if lo is not None and hi is not None else ""
+
+    def _after_drag(self, node: Node | None, before: float | None) -> str:
+        """What a drag did to the control it started on, read back from the app: a drag's effect is measured, not assumed."""
+        if before is None:
+            return ""
+        time.sleep(0.15)
+        after = self._reading(node)
+        name = ol.describe(node).split(" =")[0]
+        if after is None:
+            return f" {name} read {before:g} before; it can't be read now."
+        if abs(after - before) < 1e-9:
+            return f" {name} still reads {after:g}: the drag did not move it."
+        return f" {name}: {before:g} → {after:g}{self._span(node)}."
+
+    def _set_number(self, call_id: str, node: Node, desc: str, value: Any) -> ToolResult:
+        """Put a slider or knob at a number. Accessibility first, as a number (number-valued controls refuse text);
+        if the app ignores that, drag the control there, reading its value after every move."""
+        ax = self.env.ax
+        now, target = self._reading(node), self._number(value)
+        lo, hi = self._range(node)
+        span = self._span(node)
+        if now is None:
+            return ToolResult(call_id, False, f"{desc} does not report a numeric value; use a screenshot and drag it instead.")
+        if target is None:
+            return ToolResult(call_id, False, f"{desc} holds a plain number{span} and reads {now:g} now; give set_value a number "
+                                              f"in its own scale, not {value!r} (units on screen such as dB may map to it non-linearly).")
+        if lo is not None and hi is not None and not lo - 1e-9 <= target <= hi + 1e-9:
+            return ToolResult(call_id, False, f"{target:g} is outside {desc}{span}; it reads {now:g} now. "
+                                              "Its numbers are the app's own scale, which may differ from the units shown on screen.")
+        tol = 0.01 * (hi - lo) if lo is not None and hi is not None and hi > lo else max(abs(target) * 0.02, 1e-3)
+        if ax.set_attr(node.ref, "AXValue", float(target)) == 0:
+            time.sleep(0.1)
+            got = self._reading(node)
+            if got is not None and abs(got - target) <= tol:
+                return ToolResult(call_id, True, f"Set {desc} to {got:g}.")
+        return self._drag_to(call_id, node, desc, target, tol)
+
+    def _drag_to(self, call_id: str, node: Node, desc: str, target: float, tol: float) -> ToolResult:
+        """Closed loop: probe which way the control moves and how fast, then move by the measured rate until it
+        reads the target. Works whatever the app maps a drag to (linear, curved, or far more sensitive than a
+        hand would guess), as long as more drag means more value."""
+        if not node.center or not node.frame:
+            return ToolResult(call_id, False, f"{desc} ignored the value and has no position to drag.")
+        if msg := self._clear_of_pilot(node.center):
+            return ToolResult(call_id, False, msg)
+        inp = self.env.input
+        cx, cy = node.center
+        w, h = node.frame[2], node.frame[3]
+        orient = str(self.env.ax.attr(node.ref, "AXOrientation") or "")
+        axes = [(1.0, 0.0), (0.0, -1.0)] if "Horizontal" in orient or (not orient and w > 1.5 * h) else [(0.0, -1.0), (1.0, 0.0)]
+        v = self._reading(node)
+        if v is None:
+            return ToolResult(call_id, False, f"{desc} ignored the value and its value can't be read back to drag it there.")
+        seen = [v]
+
+        def move(axis: tuple[float, float], pts: float) -> float | None:
+            inp.drag(cx, cy, cx + axis[0] * pts, cy + axis[1] * pts, duration=0.12)
+            time.sleep(0.12)
+            out = self._reading(node)
+            seen.append(out)
+            return out
+
+        rate, axis = None, axes[0]
+        for axis in axes:  # which direction raises it, and by how much per point
+            probe = 2.0 if target > (v or 0) else -2.0
+            got = move(axis, probe)
+            if got is None:
+                break
+            if abs(got - v) > 1e-9:
+                rate, v = (got - v) / probe, got
+                break
+        trail = " → ".join(f"{x:g}" for x in seen if x is not None)
+        if rate is None:
+            return ToolResult(call_id, False, f"{desc} ignored the value, and dragging it up, down, left or right did not change it "
+                                              f"(it reads {trail}). Try its menu, a text box next to it, or keyboard arrows after clicking it.")
+        for _ in range(self.SLIDER_TRIES):
+            if abs(v - target) <= tol:
+                break
+            pts = max(-300.0, min(300.0, (target - v) / rate))
+            if abs(pts) < 1:
+                pts = 1.0 if pts >= 0 else -1.0  # the smallest move a pointer can make
+            got = move(axis, pts)
+            if got is None:
+                break
+            if abs(got - v) > 1e-9:
+                rate = (got - v) / pts  # the rate just measured, near where it is now: the control may be curved
+            v = got
+        trail = " → ".join(f"{x:g}" for x in seen if x is not None)
+        if abs(v - target) <= tol:
+            return ToolResult(call_id, True, f"Set {desc} to {v:g} by dragging it ({trail}).")
+        return ToolResult(call_id, False, f"Dragged {desc} towards {target:g} but the closest it came is {v:g} ({trail}); one point of "
+                                          "drag moves it further than that. Accept this value, or try holding a fine-adjust key while dragging.")
+
+    OWN_WINDOW = ("Refused: that point is covered by Pilot's own window (or the terminal running it), so the click "
+                  "would land there, not in the app. Reach the control another way (its menu, a keyboard shortcut, "
+                  "or scroll it into another part of the screen).")
+
+    def _clear_of_pilot(self, *points: tuple[float, float]) -> str | None:
+        """None when a pointer action at these points lands in the app, not in Pilot. A click goes to whatever
+        window is on top there, whichever element it was aimed at: Pilot once pressed its own Stop button this
+        way, aiming at a track header that its floating window covered. The Pilot window steps aside when it can."""
+        on_host = getattr(self.env, "host_window_at", None)
+        if self.allow_host or not self.env.host_pid or on_host is None:
+            return None
+        for x, y in points:
+            if not on_host(x, y):
+                continue
+            room = getattr(self.env, "make_room", None)
+            if room is not None and room(x, y) and not on_host(x, y):
+                continue
+            return self.OWN_WINDOW
+        return None
+
     def _hit(self, x: float, y: float) -> Node | None:
         return self.env.ax.element_at(x, y) if self.env.use_ax else None
 
@@ -455,6 +592,8 @@ class Toolbox:
             if msg := self._guard_consent():
                 return ToolResult(call.id, False, msg)
             pt = self._pt(a.get("coordinate")) or inp.position()
+            if msg := self._clear_of_pilot(pt):
+                return ToolResult(call.id, False, msg)
             hit = self._hit(*pt)
             desc = ""
             if hit is not None:
@@ -473,8 +612,12 @@ class Toolbox:
             start, end = self._pt(a.get("start_coordinate")), self._pt(a.get("coordinate"))
             if start is None or end is None:
                 return ToolResult(call.id, False, "left_click_drag needs start_coordinate and coordinate.")
+            if msg := self._clear_of_pilot(start, end):
+                return ToolResult(call.id, False, msg)
+            grabbed = self._hit(*start)
+            before = self._reading(grabbed)
             inp.drag(*start, *end, modifiers=a.get("text"))
-            return ToolResult(call.id, True, "Dragged.")
+            return ToolResult(call.id, True, "Dragged." + self._after_drag(grabbed, before))
         if act == "mouse_move":
             pt = self._pt(a.get("coordinate"))
             if pt is None:
@@ -486,6 +629,8 @@ class Toolbox:
             return ToolResult(call.id, True, "OK")
         if act == "scroll":
             pt = self._pt(a.get("coordinate")) or inp.position()
+            if msg := self._clear_of_pilot(pt):
+                return ToolResult(call.id, False, msg)
             inp.scroll(*pt, a.get("scroll_direction", "down"), int(a.get("scroll_amount", 3) or 3), a.get("text"))
             return ToolResult(call.id, True, "Scrolled.")
         if act == "type":
@@ -630,6 +775,8 @@ class Toolbox:
             if node.secure:
                 if msg := self._check(Verdict("confirm", "filling a password field"), f"fill {desc}"):
                     return ToolResult(call.id, False, msg)
+            if node.role in self.VALUE_ROLES and node.ref is not None:
+                return self._set_number(call.id, node, desc, value)
             if node.role in {"AXPopUpButton", "AXMenuButton"} and node.ref is not None:
                 # Choose from a popup through Accessibility: pixel clicks on menu items can land
                 # without registering (seen live: Safari's Country <select> stayed "Choose…").
@@ -647,6 +794,8 @@ class Toolbox:
             if node.ref is not None:
                 ax.set_attr(node.ref, "AXFocused", True)
             if node.center:
+                if msg := self._clear_of_pilot(node.center):
+                    return ToolResult(call.id, False, msg)
                 inp.click(*node.center)
             focused = self._await_focus(node)
             if msg := self._guard_keyboard():
@@ -662,6 +811,8 @@ class Toolbox:
             if node.ref is not None and ax.set_attr(node.ref, "AXFocused", True) == 0:
                 return ToolResult(call.id, True, f"Focused {desc}.")
             if node.center:
+                if msg := self._clear_of_pilot(node.center):
+                    return ToolResult(call.id, False, msg)
                 inp.click(*node.center)
                 return ToolResult(call.id, True, f"Clicked to focus {desc}.")
             return ToolResult(call.id, False, f"Could not focus {desc}.")
@@ -677,6 +828,8 @@ class Toolbox:
         if action in {"press", "show_menu"} and node.center:
             if self.env.host_pid and node.ref is not None and ax.pid_of(node.ref) == self.env.host_pid and not self.allow_host:
                 return ToolResult(call.id, False, "Refused: element belongs to the terminal running Pilot.")
+            if msg := self._clear_of_pilot(node.center):  # the element is the app's, but the point may be under Pilot
+                return ToolResult(call.id, False, msg)
             inp.click(*node.center, button="right" if action == "show_menu" else "left")
             time.sleep(0.1)
             return ToolResult(call.id, True, f"{action} {desc} (by clicking its centre).")

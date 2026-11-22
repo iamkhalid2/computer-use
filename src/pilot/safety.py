@@ -79,6 +79,33 @@ NEGATION = re.compile(r"(\bnot\b|n['’]t\b|\bdont\b|\bnever\b|\bwithout\b|\bno\
 CLAUSE_END = re.compile(r"[.;!?,\n]|\bbut\b|\bthen\b")
 
 
+# "Do not ask for permissions, I give you full access": the user waives the routine questions for this job.
+GRANT = re.compile(
+    r"\b(?:do not|don['’]?t|dont|no need to|stop|never) ask(?:ing)?(?: me)?(?: for)?(?: any(?: more)?)?(?: more)? "
+    r"(?:permission|permissions|approval|approvals|confirmation|confirmations)\b"
+    r"|\b(?:full|complete|total|unrestricted) (?:access|permission|permissions|control)\b"
+    r"|\bwithout asking(?: me)?(?: for)? (?:permission|permissions|approval|confirmation)\b", re.I)
+GRANT_NEGATED = re.compile(r"(\bnot\b|n['’]t\b|\bno\b|\bnever\b|\bwithout\b)[^.;!?,\n]{0,24}$", re.I)
+# What a waiver never covers: money, anything that leaves the Mac or speaks for the user, accounts,
+# passwords, macOS security prompts, and what can't be taken back.
+NOT_WAIVED = re.compile(
+    r"\b(send|purchase|buy|pay|payment|place order|order now|checkout|check out|submit|transfer|subscribe|unsubscribe|"
+    r"publish|post|tweet|reply all|share|invite|sign in|sign out|log in|log out|password|permission|security|"
+    r"empty trash|uninstall|format|erase disk|wipe|force quit|quit)\b|cmd\+q|command\+q", re.I)
+# Shell commands a waiver never covers: deleting, stopping processes, reaching the network, system settings.
+NOT_WAIVED_SHELL = re.compile(
+    r"\b(rm|rmdir|srm|unlink|trash|shred|kill|killall|pkill|launchctl|defaults|osascript|curl|wget|scp|rsync|ssh|sftp|"
+    r"ftp|nc|mail|sendmail|diskutil|tmutil|chmod|chown|git|sudo)\b")
+
+
+def grants_waiver(low: str) -> bool:
+    for m in GRANT.finditer(low):
+        if m.group(0).startswith(("full", "complete", "total", "unrestricted")) and GRANT_NEGATED.search(low[:m.start()]):
+            continue  # "you don't have full access"
+        return True
+    return False
+
+
 def asked_verbs(low: str) -> set[str]:
     """The risky verbs the request asks for: mentioned, and not only in order to rule them out."""
     out = set()
@@ -104,6 +131,7 @@ class TaskScope:
     verbs: set[str] = field(default_factory=set)
     bulk: bool = False  # the request itself says "all" or "every": "Delete" never authorises "Delete all" otherwise
     text: str = ""  # the request, lowercased: a process may be stopped only if the user named it
+    waived: bool = False  # the user said not to ask for permission: routine questions are skipped (see `waives`)
 
     @classmethod
     def from_task(cls, task: str, extra_roots: list[str] | None = None) -> "TaskScope":
@@ -117,7 +145,23 @@ class TaskScope:
             roots.append(path.parent if path.suffix and not path.is_dir() else path)
         roots += [Path(os.path.expanduser(r)).resolve() for r in (extra_roots or [])]
         low = task.lower()
-        return cls(origins, roots, asked_verbs(low), bool(BULK.search(low)), low)
+        return cls(origins, roots, asked_verbs(low), bool(BULK.search(low)), low, grants_waiver(low))
+
+    def waives(self, verdict: "Verdict", action: str) -> bool:
+        """The user's "don't ask me for permission" covers this question: routine work inside the job (deleting a
+        clip, a key that deletes, writing a file, a local command). Never money, sending, accounts, passwords,
+        macOS prompts, quitting, or a shell command that deletes, kills or reaches the network."""
+        if not self.waived or verdict.level != "confirm":
+            return False
+        key = action.startswith("press ") and verdict.reason.startswith("key ")
+        said = action if key else f"{action} {verdict.reason}"  # a key's reason is generic ("can delete or quit"): judge the key
+        if NOT_WAIVED.search(said):
+            return False
+        if action.startswith("shell:") and NOT_WAIVED_SHELL.search(action):
+            return False
+        if action.startswith(("run AppleScript", "open ")):
+            return False  # scripts and deep links can send, call or run things
+        return True
 
     def add_places(self, text: str) -> None:
         """Widen where Pilot may work with the folders and sites in something the user typed when asked.
@@ -358,6 +402,7 @@ class Policy:
         self.confirm = confirm
         self.approved: set[str] = set()
         self.scope = TaskScope()
+        self.on_grant: Callable[[str, str], None] | None = None  # told of each question the user's waiver skipped
 
     def check(self, verdict: Verdict, action: str) -> tuple[bool, str]:
         if verdict.level == "block":
@@ -367,6 +412,10 @@ class Policy:
             return True, ""
         key = f"{action}|{verdict.reason}"
         if key in self.approved:
+            return True, ""
+        if self.mode != "all" and self.scope.waives(verdict, action):
+            if self.on_grant is not None:
+                self.on_grant(action, verdict.reason)
             return True, ""
         if self.confirm is None:
             return False, f"Not allowed without a human ({verdict.reason or action}). Find another way or report that you need the user."

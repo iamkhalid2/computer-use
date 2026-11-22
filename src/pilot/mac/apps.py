@@ -80,6 +80,27 @@ def shell(command: str, timeout: float = 30.0) -> RunResult:
     return run(command, timeout=timeout, shell=True)
 
 
+OVERLAY_LAYER = 20  # the Dock, the menu bar and system overlays sit at or above this; app and floating windows below
+
+
+def owner_at(x: float, y: float) -> int | None:
+    """The process whose window is on top at (x, y), in screen points, front to back as the window server
+    stacks them. A click there lands in that window, whatever the accessibility tree says is behind it."""
+    try:
+        import Quartz
+    except Exception:
+        return None
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+        if int(w.get("kCGWindowLayer", 0)) >= OVERLAY_LAYER or float(w.get("kCGWindowAlpha", 1)) <= 0:
+            continue
+        b = w.get("kCGWindowBounds") or {}
+        bx, by, bw, bh = (float(b.get(k, 0)) for k in ("X", "Y", "Width", "Height"))
+        if bx <= x < bx + bw and by <= y < by + bh:
+            return int(w.get("kCGWindowOwnerPID", -1))
+    return None
+
+
 def visible_windows(limit: int = 10) -> list[str]:
     """On-screen windows, front to back: "App — Title". Needs no AX permission."""
     try:

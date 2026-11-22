@@ -28,6 +28,10 @@ def suite_tasks(suite: str) -> list[EvalTask]:
         from .holdout import HOLDOUT
 
         return list(HOLDOUT)
+    if suite == "games":
+        from .games import GAMES
+
+        return list(GAMES)
     return TASKS
 
 
@@ -117,7 +121,7 @@ def run_evals(presets: list[str], task_ids: list[str] | None, repeat: int, overr
     record_preexisting()
     os.environ.setdefault("PILOT_BROWSER", "Safari")  # web fixtures open in Safari, never in the user's browser
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{'holdout' if suite == 'holdout' else 'pilotbench'}-{datetime.now():%Y%m%d-%H%M%S}.json"
+    path = out_dir / f"{ {'holdout': 'holdout', 'games': 'games'}.get(suite, 'pilotbench')}-{datetime.now():%Y%m%d-%H%M%S}.json"
     streak = 0
     skills: Any = None  # the playbook store of the arm being run (one per preset, empty at the start of this invocation)
     stores: dict[str, Any] = {}

@@ -5,12 +5,15 @@ Three things make it safe for an agent that drives the same screen:
     app the user was in stays frontmost and is what the agent sees and types into.
   * It takes the keyboard only while it has something to ask. While Pilot works the panel refuses
     key status, so pressing Stop never steals typing from the app being driven.
-  * It shrinks to a strip while Pilot works, and Pilot's own guards refuse any click or keystroke
-    aimed at its own process (`env.host_pid`).
+  * It shrinks to a strip while Pilot works, and Pilot's own guards refuse any keystroke aimed at its
+    own process (`env.host_pid`) and any click that would land on this window. When the window covers
+    what Pilot needs to click, it moves to the other side of the screen (`make_room`).
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import AppKit
@@ -91,6 +94,7 @@ class Window:
         p.makeKeyAndOrderFront_(None)
         p.orderFrontRegardless()
         session.on_state = lambda state: AppHelper.callAfter(self.apply, state)
+        session.room = self.make_room
 
     def _resize(self, compact: bool) -> None:
         """Between the full window and the strip, keeping the top-right corner where the user left it."""
@@ -127,6 +131,43 @@ class Window:
                 sound = AppKit.NSSound.soundNamed_("Glass" if state == "done" else "Tink")
                 if sound is not None:
                     sound.play()
+
+    # -- stepping aside -------------------------------------------------------------------
+    def make_room(self, x: float, y: float) -> bool:
+        """Called from the agent's thread when Pilot must reach (x, y), in top-left screen points, and this window
+        covers it: move to the other side of the screen. True once moved. The agent waits for the move, because
+        a click sent before the window server redraws still lands on this window."""
+        done, out = threading.Event(), {"moved": False}
+
+        def go() -> None:
+            try:
+                out["moved"] = self._dodge(x, y)
+            finally:
+                done.set()
+
+        AppHelper.callAfter(go)
+        done.wait(1.5)
+        if out["moved"]:
+            time.sleep(0.25)
+        return out["moved"]
+
+    def _dodge(self, x: float, y: float) -> bool:
+        f = self.panel.frame()
+        primary = AppKit.NSScreen.screens()[0].frame()  # Cocoa counts y up from the primary screen's bottom
+        top = primary.size.height - (f.origin.y + f.size.height)
+        if not (f.origin.x <= x <= f.origin.x + f.size.width and top <= y <= top + f.size.height):
+            return False
+        vis = (self.panel.screen() or AppKit.NSScreen.mainScreen()).visibleFrame()
+        on_right = f.origin.x + f.size.width / 2 > vis.origin.x + vis.size.width / 2
+        nx = vis.origin.x + MARGIN if on_right else vis.origin.x + vis.size.width - f.size.width - MARGIN
+        ny = f.origin.y
+        if nx <= x <= nx + f.size.width:  # a window too wide to clear the point sideways: go to the other end
+            at_top = f.origin.y + f.size.height > vis.origin.y + vis.size.height / 2
+            ny = vis.origin.y + MARGIN if at_top else vis.origin.y + vis.size.height - f.size.height - MARGIN
+            nx = f.origin.x
+        self.panel.setFrame_display_animate_(NSMakeRect(nx, ny, f.size.width, f.size.height), True, False)
+        print(f"window: stepped aside for a click at {x:.0f},{y:.0f}", flush=True)
+        return True
 
     def _shrink_if_still_working(self) -> None:
         if self.state == "working":

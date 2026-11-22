@@ -101,7 +101,9 @@ def cmd_task(argv: list[str]) -> int:
         rate(out)
         return 0 if out.success else 1
     reporter.c.print("[bold]Pilot[/] interactive · type a task, or 'exit'")
-    history: list[str] = []
+    from .agent.job import Job
+
+    job = Job()  # an unfinished request carries over to the next message ("continue", "fix it")
     while True:
         try:
             task = reporter.c.input("[bold cyan]› [/]").strip()
@@ -111,9 +113,9 @@ def cmd_task(argv: list[str]) -> int:
             return 0
         if not task:
             continue
-        out = agent.run(task, context=" | ".join(history[-4:]))
+        out = agent.run(task, context=job.context(), earlier=job.earlier())
         rate(out)
-        history.append(f"{task} → {'done' if out.success else 'not done'}{': ' + out.answer[:120] if out.answer else ''}")
+        job.after(task, out)
 
 
 def cmd_feedback(argv: list[str]) -> int:
@@ -218,10 +220,11 @@ def cmd_eval(argv: list[str]) -> int:
     p.add_argument("--list", action="store_true", help="list tasks")
     p.add_argument("--validate", action="store_true", help="check every grader with its oracle (no model calls)")
     p.add_argument("--with-apps", action="store_true", help="include oracles that drive Notes via AppleScript")
-    p.add_argument("--suite", default="bench", choices=["bench", "holdout"], help="holdout: the sealed suite nothing was tuned on")
+    p.add_argument("--suite", default="bench", choices=["bench", "holdout", "games"],
+                   help="holdout: the sealed suite nothing was tuned on · games: timing, dial and reaction games (speed and real-time control)")
     p.add_argument("--freeze", action="store_true", help="with --validate --suite holdout: record the suite's hash once every grader is valid")
     p.add_argument("--retry", action="store_true", help="after a failed run, reflect on it and try the task once more (second-attempt test)")
-    p.add_argument("--playbooks", action="store_true", help="bench only: start with no playbooks and learn as it goes; with --repeat 3, "
+    p.add_argument("--playbooks", action="store_true", help="bench and games only: start with no playbooks and learn as it goes; with --repeat 3, "
                    "run 1 is cold and runs 2-3 show what repeat use saves (`pilot learn curve <results>`)")
     _common(p)
     args = p.parse_args(argv)
@@ -251,9 +254,9 @@ def cmd_eval(argv: list[str]) -> int:
     overrides = {k: getattr(args, k) for k in ["approve", "use_ax", "jev", "verify", "plan", "max_minutes", "max_cost", "max_turns"] if getattr(args, k) is not None}
     if args.planner or args.executor:
         overrides.update(planner=args.planner, executor=args.executor)
-    if args.playbooks and args.suite == "bench":
+    if args.playbooks and args.suite != "holdout":
         overrides["playbooks"] = "learn"
-    out = Path(args.out) / "holdout" if args.suite == "holdout" else Path(args.out)
+    out = Path(args.out) / args.suite if args.suite in {"holdout", "games"} else Path(args.out)  # kept apart: the scorecard reads evals/ as the bench
     run_evals(presets, task_ids, args.repeat, overrides, out, tags, args.suite, retry=args.retry)
     return 0
 
